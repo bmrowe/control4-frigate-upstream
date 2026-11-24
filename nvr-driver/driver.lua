@@ -442,33 +442,25 @@ end
 --- configured. Only the terminal ones are forwarded: a review is one incident,
 --- and the camera driver decides how long to wait for the summary before
 --- settling for the object list.
-function handleReviewJSON(payload)
-    if not payload or payload == "" then return end
-
-    local msgType = jsonString(payload, "type") or ""
-    if msgType ~= "end" and msgType ~= "genai" then return end
-
-    local after = payload:match('"after"%s*:%s*(%b{})')
-    if not after then
-        log(LOG_DEBUG, "Review payload has no 'after' object — discarding")
-        return
-    end
-
-    local camera = jsonString(after, "camera")
+--- Forward one review object to the camera it belongs to.
+--- `obj` is a review segment: the `after` of an MQTT message, or a row from
+--- /api/review, which returns the same shape.
+function forwardReview(obj, msgType)
+    local camera = jsonString(obj, "camera")
     if not camera then
-        log(LOG_DEBUG, "Review payload missing 'camera' — discarding")
-        return
+        log(LOG_DEBUG, "Review has no 'camera' — discarding")
+        return false
     end
 
-    local data     = jsonObject(after, "data") or "{}"
+    local data     = jsonObject(obj, "data") or "{}"
     local metadata = jsonObject(data, "metadata")
 
     sendToCamera(camera, "FRIGATE_REVIEW", {
-        id          = jsonString(after, "id") or "",
+        id          = jsonString(obj, "id") or "",
         review_type = msgType,
-        severity    = jsonString(after, "severity") or "",
-        start_time  = jsonNumber(after, "start_time") or 0,
-        end_time    = jsonNumber(after, "end_time") or 0,
+        severity    = jsonString(obj, "severity") or "",
+        start_time  = jsonNumber(obj, "start_time") or 0,
+        end_time    = jsonNumber(obj, "end_time") or 0,
         objects     = jsonStringArray(data, "objects"),
         sub_labels  = jsonStringArray(data, "sub_labels"),
         zones       = jsonStringArray(data, "zones"),
@@ -480,6 +472,21 @@ function handleReviewJSON(payload)
         summary      = metadata and (jsonString(metadata, "shortSummary") or "") or "",
         threat_level = metadata and (jsonNumber(metadata, "potential_threat_level") or 0) or 0,
     })
+    return true
+end
+
+function handleReviewJSON(payload)
+    if not payload or payload == "" then return end
+
+    local msgType = jsonString(payload, "type") or ""
+    if msgType ~= "end" and msgType ~= "genai" then return end
+
+    local after = payload:match('"after"%s*:%s*(%b{})')
+    if not after then
+        log(LOG_DEBUG, "Review payload has no 'after' object — discarding")
+        return
+    end
+    forwardReview(after, msgType)
 end
 
 --- Handle a GenAI object description from frigate/tracked_object_update.
@@ -497,6 +504,52 @@ function handleObjectDescription(payload)
         id          = jsonString(payload, "id") or "",
         description = description,
     })
+end
+
+--- Send recent review items to the camera children, for the Timeline.
+---
+--- The Timeline is a record of what has already happened, and SetPastEvent
+--- stamps each entry with the review's own start time, so there is nothing
+--- odd about filling it from history. Without this, a freshly installed
+--- driver shows an empty Timeline until new activity happens, while Frigate
+--- already holds weeks of it.
+---
+--- Not done automatically at startup: that would replay the same incidents
+--- on every driver reload. The children deduplicate by review id, so running
+--- it twice in a session is harmless.
+function replayReviews(limit)
+    limit = tonumber(limit) or 50
+    if limit < 1 then limit = 1 end
+    if limit > 200 then limit = 200 end
+
+    local base = apiBaseURL()
+    if not base then
+        log(LOG_WARNING, "Cannot replay reviews — set Frigate Host first")
+        return
+    end
+
+    local url = base .. "/api/review?limit=" .. limit
+    C4:urlGet(url, apiHeaders(), false, function(ticket, data, code, headers, err)
+        if code ~= 200 or not data or data == "" then
+            log(LOG_WARNING, "Replay failed: HTTP " .. tostring(code)
+                .. " " .. tostring(err))
+            return
+        end
+
+        -- Oldest first, so the Timeline is written in the order things
+        -- happened rather than newest-first as the API returns them.
+        local rows = {}
+        for obj in data:gmatch("%b{}") do rows[#rows + 1] = obj end
+
+        local sentCount = 0
+        for i = #rows, 1, -1 do
+            -- genai, not end: these are finished, so there is no summary
+            -- still to wait for. Whatever metadata they have is final.
+            if forwardReview(rows[i], "genai") then sentCount = sentCount + 1 end
+        end
+        log(LOG_INFO, "Replayed " .. sentCount .. " of " .. #rows
+            .. " review item(s) to the Timeline")
+    end)
 end
 
 --- Map each configured zone to the camera that owns it.
@@ -1513,6 +1566,8 @@ function ExecuteCommand(sCommand, tParams)
         end
     elseif cmd == "ReconnectMQTT" then
         connectMQTT()
+    elseif cmd == "ReplayReviews" then
+        replayReviews((tParams or {}).LIMIT or (tParams or {}).limit)
     elseif cmd == "AdoptCameras" then
         adoptOrphanCameras()
     elseif cmd == "CheckUpdates" then

@@ -723,15 +723,23 @@ end
 function reviewSeenForTest() return reviewSeen end
 
 --- What to call this incident on the Timeline.
---- The GenAI title when there is one, otherwise the objects Frigate saw.
+--- The GenAI title when there is one. A summary is not always generated --
+--- the provider can fail or decline -- so the fallback is read as often as
+--- the title and gets the same tidying the rest of the driver applies.
 local function reviewLabel(p)
     local title = p.title
     if title and title ~= "" then return title end
+
     local objects = p.objects
     if objects and objects ~= "" then
+        local friendly = {}
+        for word in objects:gmatch("[^,%s][^,]*") do
+            friendly[#friendly + 1] = friendlyObject((word:gsub("%s+$", "")))
+        end
+        local list = table.concat(friendly, ", ")
         local subs = p.sub_labels
-        if subs and subs ~= "" then return subs .. " (" .. objects .. ")" end
-        return objects
+        if subs and subs ~= "" then return subs .. " (" .. list .. ")" end
+        return list
     end
     return "Activity"
 end

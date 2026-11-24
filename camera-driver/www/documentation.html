@@ -156,6 +156,13 @@
   (<i>"Joe (person)"</i>). Waiting does not move the entry — it is stamped with the review's own start
   time. Set the wait to <code>Off</code> if GenAI review summaries are not configured.</p>
 
+  <p>A GenAI summary is not always produced — the provider can fail or decline — so the object-list
+  fallback is read about as often as the title on a busy system. It is tidied the same way the rest of
+  the driver names objects, so it reads <i>"Person, Car"</i> rather than <i>"person, car"</i>.</p>
+
+  <p>The Timeline need not start empty: the NVR's <b>Send Recent Reviews to Timeline</b> action
+  replays recent review items from Frigate's API, each stamped with its own start time.</p>
+
   <p><code>Timeline Review Severity</code> chooses which review severities qualify. The default,
   <code>Alerts only</code>, keeps the Timeline to what Frigate itself considers worth looking at.</p>
 

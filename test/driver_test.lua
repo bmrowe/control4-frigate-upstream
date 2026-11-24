@@ -493,8 +493,8 @@ review({ id = "rev-nogenai", objects = "person, car" })
 runTimers()
 check("without a summary the object list is used", #timelinePayloads == 1,
       #timelinePayloads)
-check("the object list is the Timeline label",
-      (timelinePayloads[1] or ""):find('"displayName":"person, car"') ~= nil,
+check("the object list is the Timeline label, tidied",
+      (timelinePayloads[1] or ""):find('"displayName":"Person, Car"') ~= nil,
       timelinePayloads[1])
 
 -- A recognised face is worth naming.
@@ -502,7 +502,7 @@ timelinePayloads, timerCallbacks = {}, {}
 review({ id = "rev-sub", objects = "person", sub_labels = "Joe" })
 runTimers()
 check("a sub label is named alongside the object",
-      (timelinePayloads[1] or ""):find('"displayName":"Joe %(person%)"') ~= nil,
+      (timelinePayloads[1] or ""):find('"displayName":"Joe %(Person%)"') ~= nil,
       timelinePayloads[1])
 
 -- Detections are below the bar by default.

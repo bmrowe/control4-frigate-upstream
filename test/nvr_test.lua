@@ -27,7 +27,19 @@ function C4:GetDeviceID() return 1000 end
 function C4:ErrorLog(msg) end
 function C4:AddTimer() return 0 end
 function C4:KillTimer() end
-function C4:urlGet() return 0 end
+urlGetResponses = {}      -- url substring -> body
+urlGetCalls     = {}
+function C4:urlGet(url, headers, verifySsl, callback)
+    urlGetCalls[#urlGetCalls + 1] = url
+    for frag, body in pairs(urlGetResponses) do
+        if url:find(frag, 1, true) then
+            if callback then callback(1, body, 200, {}, nil) end
+            return 1
+        end
+    end
+    if callback then callback(1, "", 404, {}, "not found") end
+    return 1
+end
 function C4:GetDriverConfigInfo() return "" end
 function C4:AddDevice() return 0 end
 function C4:RenameDevice() end
@@ -420,6 +432,106 @@ for _, t in ipairs(topics) do
 end
 check("every MQTT topic shape survives the router", #brokeTopics == 0,
       table.concat(brokeTopics, " | "))
+
+------------------------------------------------------------------------
+-- Replaying reviews into the Timeline
+------------------------------------------------------------------------
+-- /api/review returns the same object shape as an MQTT review's `after`,
+-- newest first. Shape taken from a live Frigate 0.18.3.
+urlGetResponses = { ["/api/review"] = [[
+[{"id":"1795557732.665197-02w8qb","camera":"bbq","start_time":1795557732.665197,
+  "end_time":1795557755.062604,"severity":"alert",
+  "thumb_path":"/media/frigate/clips/review/thumb-bbq-1795557732.webp",
+  "has_been_reviewed":false,
+  "data":{"detections":["1795557732.1-aaa"],"objects":["person"],
+          "verified_objects":[],"sub_labels":[],"zones":[],"audio":[],
+          "thumb_time":1795557740}},
+ {"id":"1795547797.540353-xv4v6s","camera":"driveway","start_time":1795547797.540353,
+  "end_time":1795547802.960775,"severity":"alert",
+  "thumb_path":"/media/frigate/clips/review/thumb-driveway-1795547797.webp",
+  "has_been_reviewed":false,
+  "data":{"detections":["1795547796.887255-qdb6tc"],"objects":["car"],
+          "verified_objects":[],"sub_labels":[],"zones":[],"audio":[],
+          "thumb_time":1795547800,
+          "metadata":{"observations":[],"scene":"A car pulls in and stops.",
+                      "title":"Stationary Car in Driveway",
+                      "shortSummary":"A silver car parked in the driveway.",
+                      "confidence":0.91,"potential_threat_level":0,
+                      "other_concerns":[],"time":"08:12"}}}]
+]] }
+
+sent, urlGetCalls = {}, {}
+local okReplay, errReplay = pcall(replayReviews, 50)
+check("replayReviews does not raise", okReplay, errReplay)
+check("it asks the API for review items",
+      (urlGetCalls[1] or ""):find("/api/review?limit=50", 1, true) ~= nil,
+      urlGetCalls[1])
+
+local forwarded = {}
+for _, m in ipairs(sent) do
+    if m.command == "FRIGATE_REVIEW" then forwarded[#forwarded + 1] = m end
+end
+-- Only "bbq" resolves to a device here; "driveway" is not managed in this
+-- harness, so it is counted as unmatched rather than forwarded.
+check("a review for a known camera is forwarded", #forwarded == 1, #forwarded)
+check("it is sent as genai, so the child does not wait for a summary",
+      forwarded[1] and forwarded[1].params.review_type == "genai",
+      forwarded[1] and forwarded[1].params.review_type)
+check("the review id is carried, so the child can deduplicate",
+      forwarded[1] and forwarded[1].params.id == "1795557732.665197-02w8qb",
+      forwarded[1] and forwarded[1].params.id)
+check("the original start time is carried, not the replay time",
+      forwarded[1] and forwarded[1].params.start_time == 1795557732.665197,
+      forwarded[1] and forwarded[1].params.start_time)
+check("the tracked object is carried, so the entry can have a picture",
+      forwarded[1] and forwarded[1].params.detections == "1795557732.1-aaa",
+      forwarded[1] and forwarded[1].params.detections)
+
+-- A row with a summary must keep it; one without must not invent one.
+sent = {}
+C4.PersistGetValue = function(self, key)
+    if key == "managed_cameras" then
+        return { bbq = { deviceId = 1586, proxyId = 5001 },
+                 driveway = { deviceId = 1590, proxyId = 5002 } }
+    end
+end
+replayReviews(50)
+local byCam = {}
+for _, m in ipairs(sent) do
+    if m.command == "FRIGATE_REVIEW" then byCam[m.params.id] = m.params end
+end
+check("both cameras are forwarded when both are managed",
+      byCam["1795557732.665197-02w8qb"] and byCam["1795547797.540353-xv4v6s"],
+      tostring(#sent))
+check("a replayed summary keeps its title",
+      (byCam["1795547797.540353-xv4v6s"] or {}).title == "Stationary Car in Driveway",
+      (byCam["1795547797.540353-xv4v6s"] or {}).title)
+check("a row with no summary carries an empty title, not a made-up one",
+      (byCam["1795557732.665197-02w8qb"] or {}).title == "",
+      (byCam["1795557732.665197-02w8qb"] or {}).title)
+check("the object list survives for the fallback label",
+      (byCam["1795557732.665197-02w8qb"] or {}).objects == "person",
+      (byCam["1795557732.665197-02w8qb"] or {}).objects)
+
+-- Guard rails.
+sent, urlGetCalls = {}, {}
+replayReviews(9999)
+check("an oversized limit is clamped",
+      (urlGetCalls[1] or ""):find("limit=200", 1, true) ~= nil, urlGetCalls[1])
+sent, urlGetCalls = {}, {}
+replayReviews(nil)
+check("no limit given uses the default",
+      (urlGetCalls[1] or ""):find("limit=50", 1, true) ~= nil, urlGetCalls[1])
+
+urlGetResponses = {}
+sent = {}
+check("an API error does not raise", pcall(replayReviews, 10))
+check("an API error forwards nothing", #sent == 0, #sent)
+
+urlGetResponses = { ["/api/review"] = "[]" }
+sent = {}
+check("an empty result does not raise", pcall(replayReviews, 10))
+check("an empty result forwards nothing", #sent == 0, #sent)
 
 realWrite(failures == 0 and "\nALL PASS\n" or ("\n" .. failures .. " FAILURE(S)\n"))
 os.exit(failures == 0 and 0 or 1)
