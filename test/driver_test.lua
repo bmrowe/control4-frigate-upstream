@@ -52,12 +52,51 @@ function C4:XmlEscapeString(s) return s end
 function C4:ErrorLog(msg) end
 function C4:AddDynamicBinding() end
 function C4:SendToProxy() end
-function C4:SendToDevice() end
+-- Timeline agent. `timelineAgentId` nil models a system where the agent was
+-- never installed, which is the common case and must stay a silent no-op.
+timelineAgentId   = nil
+timelinePayloads  = {}
+timelineReply     = "<success>true</success>"
+sentToDevice      = {}
+
+function C4:GetDevicesByC4iName(name)
+    if name == "agent-timeline.c4z" then
+        if not timelineAgentId then return {} end
+        return { [timelineAgentId] = "Timeline" }
+    end
+    if name == "frigate-camera.c4z" then
+        return { [1586] = "Frigate Camera" }   -- matches GetDeviceID()
+    end
+    return {}
+end
+-- Records the plaintext so a test can assert on the payload the driver built,
+-- and returns something that is clearly not the plaintext.
+lastBase64Plain = nil
+function C4:Base64Encode(str) lastBase64Plain = str; return "B64(" .. #str .. ")" end
+function C4:GetDeviceDisplayName(id) return "Back Yard" end
+function C4:SendToDevice(id, cmd, params)
+    sentToDevice[#sentToDevice + 1] = { id = id, cmd = cmd, params = params }
+    if cmd == "SetPastEvent" then
+        timelinePayloads[#timelinePayloads + 1] = lastBase64Plain
+        return timelineReply
+    end
+end
 function C4:urlEncode(s) return s end
 function C4:urlGet() return 0 end
 function C4:GetDriverConfigInfo() return "" end
 function C4:AllowExecuteDeviceCommand() end
-function C4:SetTimer() return 0 end
+-- Timer callbacks are recorded so a test can run them; the driver looks for
+-- agents again on a timer because they are not always up when it loads.
+timerCallbacks = {}
+function C4:SetTimer(ms, fn)
+    if type(fn) == "function" then timerCallbacks[#timerCallbacks + 1] = fn end
+    return #timerCallbacks
+end
+function runTimers()
+    local pending = timerCallbacks
+    timerCallbacks = {}
+    for _, fn in ipairs(pending) do fn() end
+end
 function C4:KillTimer() end
 function C4:GetTime() return "12:00:00" end
 function C4:UpdateBoundDevice() end
@@ -293,6 +332,84 @@ check("every object type stays registered",
 check("audio and status types stay registered",
       registeredTypes["Audio: Speech"] and registeredTypes["Camera Offline"]
       and registeredTypes["Recording Disabled"])
+
+------------------------------------------------------------------------
+-- Timeline agent reporting
+------------------------------------------------------------------------
+-- No agent installed: the common case, and it must stay silent.
+timelineAgentId, timelinePayloads = nil, {}
+history = {}
+local okNoAgent = pcall(ExecuteCommand, "FRIGATE_DETECTION",
+    { object_type = "person", count = 1, event_type = "new" })
+check("a missing Timeline agent does not raise", okNoAgent)
+check("a missing Timeline agent sends nothing", #timelinePayloads == 0, #timelinePayloads)
+check("a missing Timeline agent still records history", #history > 0, #history)
+check("status says the agent is not installed",
+      (props["Timeline Status"] or ""):find("no Timeline agent") ~= nil,
+      props["Timeline Status"])
+
+-- Agent present.
+timelineAgentId, timelinePayloads = 4242, {}
+OnDriverLateInit()
+check("the driver schedules a second look for the agent", #timerCallbacks > 0)
+runTimers()                          -- the agent came up after the driver did
+check("the retry finds an agent that appeared late",
+      (props["Timeline Status"] or ""):find("agent 4242") ~= nil,
+      props["Timeline Status"])
+history = {}
+ExecuteCommand("FRIGATE_DETECTION", { object_type = "person", count = 1, event_type = "new" })
+check("a detection reaches the Timeline agent", #timelinePayloads > 0, #timelinePayloads)
+
+local payload = timelinePayloads[1] or ""
+check("the payload names this driver's own package",
+      payload:find('"fileName":"frigate%-camera%.c4z"') ~= nil, payload)
+check("the payload carries this device id",
+      payload:find('"deviceId":1586') ~= nil, payload)
+check("the payload names the event",
+      payload:find('"displayName":"Person Detected"') ~= nil, payload)
+check("the payload carries an integer timestamp",
+      payload:match('"timestamp":(%d+)') ~= nil, payload)
+check("the payload carries a v4 uuid",
+      payload:match('"id":"%x+%-%x+%-4%x+%-%x+%-%x+"') ~= nil, payload)
+check("it was sent to the agent as SetPastEvent",
+      sentToDevice[#sentToDevice].id == 4242
+      and sentToDevice[#sentToDevice].cmd == "SetPastEvent")
+
+-- Two detections must not share an event id.
+timelinePayloads = {}
+ExecuteCommand("FRIGATE_DETECTION", { object_type = "car", count = 1, event_type = "new" })
+ExecuteCommand("FRIGATE_DETECTION", { object_type = "dog", count = 1, event_type = "new" })
+local id1 = (timelinePayloads[1] or ""):match('"id":"([^"]+)"')
+local id2 = (timelinePayloads[2] or ""):match('"id":"([^"]+)"')
+check("each event gets a distinct id", id1 and id2 and id1 ~= id2,
+      tostring(id1) .. " / " .. tostring(id2))
+
+-- The category switches gate the Timeline as well, so motion cannot flood it.
+timelinePayloads = {}
+ExecuteCommand("FRIGATE_MOTION", { active = true })
+check("suppressed motion does not reach the Timeline either",
+      #timelinePayloads == 0, #timelinePayloads)
+
+-- Its own master switch.
+Properties["Timeline Reporting"] = "No"
+timelinePayloads = {}
+ExecuteCommand("FRIGATE_DETECTION", { object_type = "person", count = 1, event_type = "new" })
+check("Timeline Reporting = No suppresses reporting",
+      #timelinePayloads == 0, #timelinePayloads)
+check("history is still written with the Timeline off", #history > 0)
+OnPropertyChanged("Timeline Reporting")
+check("status reflects being switched off",
+      props["Timeline Status"] == "Disabled", props["Timeline Status"])
+Properties["Timeline Reporting"] = nil
+
+-- A rejecting agent is reported, not swallowed.
+OnPropertyChanged("Timeline Reporting")
+timelineReply, timelinePayloads = "<success>false</success>", {}
+ExecuteCommand("FRIGATE_DETECTION", { object_type = "person", count = 1, event_type = "new" })
+check("a rejected event is surfaced in the status",
+      (props["Timeline Status"] or ""):find("rejected") ~= nil,
+      props["Timeline Status"])
+timelineReply = "<success>true</success>"
 
 realWrite(failures == 0 and "\nALL PASS\n" or ("\n" .. failures .. " FAILURE(S)\n"))
 os.exit(failures == 0 and 0 or 1)

@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **Timeline agent reporting (camera driver).** Detections are now reported to the Control4 Timeline agent via `SetPastEvent`, which Navigator renders as its own scrubbing view, separate from the history. New camera property `Timeline Reporting` (`Yes` by default) and a read-only `Timeline Status` that says whether it is actually working. On a system where the Timeline agent was never installed this is a silent no-op — the agent is looked up by `agent-timeline.c4z`, retried once a minute while absent, and looked for again 15s after load because agents are not always up when a driver is.
+
+- **Per-category history switches (camera driver).** Five new properties decide what reaches the history: `Record Object Detections`, `Record Motion Events`, `Record Zone Events`, `Record Audio Events` and `Record Camera Status`. They gate Timeline reporting too, so a category cannot flood one view while being suppressed in the other.
+
+### Changed
+
+- **Motion is no longer written to the history by default.** Frigate publishes `frigate/<camera>/motion` on every transition, so each camera with any traffic wrote a continuous stream of `Motion Detected` / `Motion Stopped` rows, burying the object detections the history exists for. Set `Record Motion Events` to `Yes` to restore the previous behaviour. The Composer event still fires either way, so programming that reacts to motion is unaffected.
+
+- **History event types are registered from the same table that categorises them**, rather than a second list kept in step by hand. Every type stays registered whatever the switches say — they decide what gets written, not what Navigator can display — so switching a category back on needs no re-registration.
+
+- Camera driver bumped to v45.
+
 ## [0.9.0-rc.1] - 2026-08-14
 
 ### Changed

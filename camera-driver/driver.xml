@@ -6,7 +6,7 @@
   <model>Frigate Camera (go2rtc)</model>
   <created>2026-03-31</created>
   <modified>2026-08-14</modified>
-  <version>44</version>
+  <version>45</version>
 
   <capabilities>
     <modes>SNAPSHOT,MJPEG,H264</modes>
@@ -141,6 +141,24 @@
           <item>Log</item>
           <item>Print and Log</item>
         </items>
+      </property>
+      <property>
+        <name>Timeline Reporting</name>
+        <type>LIST</type>
+        <default>Yes</default>
+        <readonly>false</readonly>
+        <items>
+          <item>Yes</item>
+          <item>No</item>
+        </items>
+        <description>Report detections to the Control4 Timeline agent, which Navigator shows as its own scrubbing view. Has no effect on systems where the Timeline agent is not installed. Events are filtered by the same category switches below.</description>
+      </property>
+      <property>
+        <name>Timeline Status</name>
+        <type>STRING</type>
+        <default>Starting</default>
+        <readonly>true</readonly>
+        <description>Whether Timeline reporting is actually working.</description>
       </property>
       <property>
         <name>Record Object Detections</name>

@@ -43,6 +43,17 @@ local PROP_HIST_ZONES   = "Record Zone Events"
 local PROP_HIST_AUDIO   = "Record Audio Events"
 local PROP_HIST_STATUS  = "Record Camera Status"
 
+local PROP_TIMELINE        = "Timeline Reporting"
+local PROP_TIMELINE_STATUS = "Timeline Status"
+
+-- The Timeline agent is a separate destination from the history: Navigator
+-- renders it as its own scrubbing view. It is absent on systems whose dealer
+-- never added it, so reporting is a no-op there rather than an error.
+local TIMELINE_AGENT_FILE  = "agent-timeline.c4z"
+-- Must match this driver's own package name, or the agent cannot associate
+-- the events it is sent with the driver that sent them.
+local TIMELINE_SOURCE_FILE = "frigate-camera.c4z"
+
 -- Log levels
 local LOG_FATAL   = 0
 local LOG_ERROR   = 1
@@ -316,6 +327,148 @@ local function historyEnabled(eventType)
     return value == "Yes"
 end
 
+------------------------------------------------------------------------
+-- Timeline Agent
+------------------------------------------------------------------------
+
+local timelineId          = nil
+local timelineResolveAfter = 0
+local timelineFileOk      = nil
+
+local function setTimelineStatus(text)
+    pcall(C4.UpdateProperty, C4, PROP_TIMELINE_STATUS, tostring(text or ""))
+end
+
+--- Confirm the agent will see our events as coming from this driver.
+--- A mismatch is not fatal, but the events will not be attributed, so it is
+--- worth saying out loud rather than leaving as a silent oddity.
+local function verifyTimelineSourceFile()
+    local me = C4:GetDeviceID()
+    local found = false
+    pcall(function()
+        for id in pairs(C4:GetDevicesByC4iName(TIMELINE_SOURCE_FILE) or {}) do
+            if tonumber(id) == tonumber(me) then found = true end
+        end
+    end)
+    timelineFileOk = found
+    if not found then
+        log(LOG_WARNING, "Timeline: source fileName '" .. TIMELINE_SOURCE_FILE
+            .. "' does not match this driver's package — events may not be "
+            .. "associated with it")
+    end
+    return found
+end
+
+--- Locate the Timeline agent, retrying at most once a minute while absent.
+local function resolveTimeline(force)
+    if not force and not timelineId and os.time() < timelineResolveAfter then
+        return nil
+    end
+    local id
+    pcall(function() id = next(C4:GetDevicesByC4iName(TIMELINE_AGENT_FILE)) end)
+    timelineId = id
+    timelineResolveAfter = id and 0 or (os.time() + 60)
+    if id then
+        log(LOG_INFO, "Timeline: agent at device " .. tostring(id))
+        verifyTimelineSourceFile()
+    else
+        log(LOG_DEBUG, "Timeline: agent not present — skipping")
+    end
+    return id
+end
+
+local function tlEscape(v)
+    v = tostring(v or ""):gsub("\\", "\\\\"):gsub('"', '\\"')
+    return (v:gsub("[\r\n\t]", { ["\r"] = "\\r", ["\n"] = "\\n", ["\t"] = "\\t" }))
+end
+
+-- Unseeded, every camera runs from identical state and emits the same
+-- sequence of "unique" ids. The device id is what makes each stream distinct.
+local tlSeeded = false
+local function tlSeedRandom()
+    if tlSeeded then return end
+    tlSeeded = true
+    local entropy = os.time() * 1000
+    pcall(function() entropy = entropy + (tonumber(C4:GetDeviceID()) or 0) * 7919 end)
+    entropy = entropy + math.floor((os.clock() * 1000000) % 100000)
+    math.randomseed(entropy % 2147483647)
+    for _ = 1, 8 do math.random() end
+end
+
+local function tlUuid()
+    tlSeedRandom()
+    local t = {}
+    for i = 1, 8 do t[i] = ("%04x"):format(math.random(0, 0xffff)) end
+    return ("%s%s-%s-4%s-%s-%s%s%s"):format(t[1], t[2], t[3], t[4]:sub(2),
+        t[5], t[6], t[7], t[8])
+end
+
+--- Report one event to the Timeline agent.
+--- Gated by the same category switches as the history, so motion does not
+--- flood the Timeline either, plus its own master switch.
+local function reportTimeline(eventType, ts)
+    if (Properties[PROP_TIMELINE] or "Yes") ~= "Yes" then return end
+    if not timelineId then resolveTimeline() end
+    if not timelineId then return end
+
+    local disp = cameraName()
+    if not disp or disp == "" then
+        pcall(function() disp = C4:GetDeviceDisplayName(C4:GetDeviceID()) end)
+    end
+
+    local eventId = tlUuid()
+    local json = table.concat({
+        '{"source":{',
+            '"deviceId":', tostring(C4:GetDeviceID()), ',',
+            '"displayName":"', tlEscape(disp or "Camera"), '",',
+            '"fileName":"', tlEscape(TIMELINE_SOURCE_FILE), '"',
+        '},"event":{',
+            '"id":"', eventId, '",',
+            '"displayName":"', tlEscape(eventType), '",',
+            '"timestamp":', tostring(math.floor(ts or os.time())),
+        '}}',
+    })
+
+    local b64
+    if not pcall(function() b64 = C4:Base64Encode(json) end) or not b64 then
+        log(LOG_WARNING, "Timeline: Base64Encode failed")
+        return
+    end
+
+    local reply
+    pcall(function()
+        reply = C4:SendToDevice(timelineId, "SetPastEvent", { payload = b64 })
+    end)
+
+    if tostring(reply) == "<success>true</success>" then
+        log(LOG_DEBUG, "Timeline: reported " .. eventType)
+        setTimelineStatus("Reported " .. eventType .. " (agent "
+            .. tostring(timelineId) .. ")")
+    else
+        log(LOG_WARNING, "Timeline: agent rejected the event — " .. tostring(reply))
+        setTimelineStatus("Agent " .. tostring(timelineId)
+            .. " rejected the last event")
+    end
+end
+
+--- Describe the Timeline setup in Composer without waiting for a detection.
+local function refreshTimelineStatus()
+    if (Properties[PROP_TIMELINE] or "Yes") ~= "Yes" then
+        setTimelineStatus("Disabled")
+        return
+    end
+    if not timelineId then resolveTimeline() end
+    if not timelineId then
+        setTimelineStatus("Enabled — but no Timeline agent is installed")
+    elseif timelineFileOk == false then
+        setTimelineStatus("Enabled — agent " .. tostring(timelineId)
+            .. ", but this driver's fileName does not match")
+    else
+        setTimelineStatus("Enabled — agent " .. tostring(timelineId)
+            .. ", waiting for a detection")
+    end
+end
+
 --- Record an event in the history database.
 ---
 --- Signature per the DriverWorks API reference (Helper Interface, 1.6.0+):
@@ -346,6 +499,10 @@ local function recordHistory(message, severity, eventType)
         log(LOG_DEBUG, "History suppressed by settings: " .. eventType)
         return
     end
+
+    -- Same gate, second destination. The Timeline is a separate view from the
+    -- history, so an event worth one is worth the other.
+    reportTimeline(eventType)
 
     local function record(...)
         local ok, uuid = pcall(C4.RecordHistory, C4, ...)
@@ -936,6 +1093,8 @@ end
 function OnPropertyChanged(sProperty)
     if sProperty == PROP_HOST or sProperty == PROP_CAMERA or sProperty == PROP_SUB_STREAM then
         updateProxy()
+    elseif sProperty == PROP_TIMELINE then
+        refreshTimelineStatus()
     end
 end
 
@@ -954,6 +1113,11 @@ function OnDriverLateInit()
 
     -- Update proxy with current config (address, ports, stream URLs)
     updateProxy()
+
+    -- Agents are not always up when a driver loads, so look again shortly
+    -- after rather than reporting "not installed" for the rest of the session.
+    refreshTimelineStatus()
+    C4:SetTimer(15000, function() resolveTimeline(true); refreshTimelineStatus() end)
 end
 
 function OnDriverDestroyed()

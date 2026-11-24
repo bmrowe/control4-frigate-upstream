@@ -116,8 +116,38 @@
   </table>
 
   <h3>History</h3>
-  <p>All detection events are recorded in the device history, visible in the Control4 app timeline and
-  on touchscreens. Loitering events are recorded with Warning severity; all others are Info.</p>
+  <p>Detection events are recorded in the device history, visible in the Control4 app and on
+  touchscreens. Loitering events are recorded with Warning severity; all others are Info.</p>
+
+  <p>Five properties decide what reaches the history, by category:</p>
+  <table>
+    <tr><th>Property</th><th>Default</th><th>Covers</th></tr>
+    <tr><td><code>Record Object Detections</code></td><td>Yes</td><td>Person, car, dog, cat and generic object detected/left</td></tr>
+    <tr><td><code>Record Motion Events</code></td><td><b>No</b></td><td>Motion Detected, Motion Stopped</td></tr>
+    <tr><td><code>Record Zone Events</code></td><td>Yes</td><td>Zone entered, zone exited, loitering</td></tr>
+    <tr><td><code>Record Audio Events</code></td><td>Yes</td><td>Speech, bark, scream, yell, fire alarm, glass breaking, siren, car horn, music</td></tr>
+    <tr><td><code>Record Camera Status</code></td><td>Yes</td><td>Camera online/offline, detection and recording enabled/disabled</td></tr>
+  </table>
+
+  <p>Motion is off by default because Frigate publishes <code>frigate/&lt;camera&gt;/motion</code> on
+  every transition: left on, a camera with any traffic writes a continuous stream of Motion Detected
+  and Motion Stopped rows that buries the object detections. Set it to <code>Yes</code> for the
+  previous behaviour. Switching a category off never affects Composer programming — the event still
+  fires, only the history row is skipped.</p>
+
+  <h3>Timeline</h3>
+  <p>The Control4 <b>Timeline agent</b> is a separate view from the history — Navigator renders it as
+  its own scrubbing timeline. With <code>Timeline Reporting</code> set to <code>Yes</code> (the
+  default) each recorded detection is also reported there.</p>
+
+  <p>This needs the Timeline agent (<code>agent-timeline.c4z</code>) to be in the project. Where it is
+  not, reporting is a silent no-op and <code>Timeline Status</code> says so. Because agents are not
+  always running when a driver loads, the driver looks again 15 seconds after startup and then at most
+  once a minute while the agent is absent. <code>Timeline Status</code> reports what is actually
+  happening: whether the agent was found, whether it accepted the last event, and whether this
+  driver's package name matches what the agent expects.</p>
+
+  <p>The category switches above gate the Timeline as well, so motion does not flood it either.</p>
 
   <h2>Requirements</h2>
   <ul>
