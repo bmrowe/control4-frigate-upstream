@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Zones were treated as cameras, and zone events never fired.** Frigate publishes zone counts on `frigate/<zone_name>/<object_name>` — the same shape as `frigate/<camera_name>/<object_name>` — so every zone arrived looking like a camera that did not exist and was listed under `Unmatched Cameras`. Meanwhile the driver subscribed to `frigate/+/+/<object>` for zones, a topic Frigate does not publish, so the zone handler was never reached. The NVR now reads the configured zone names from `cameras.<camera>.zones` in `/api/config` and routes a zone's counts to the camera that owns it; the dead subscription is gone. A zone name used on two cameras is ambiguous on the wire — the topic names only the zone — so the first camera wins and the clash is logged rather than silently resolved.
+
 ### Added
 
 - **Timeline agent reporting, driven by review items.** The Control4 Timeline agent is a separate destination from the history — Navigator renders it as its own scrubbing view — and the driver never wrote to it, so that view stayed empty on every install. It is now fed from `frigate/reviews`: one entry per incident, rather than one per object-count transition. New camera properties `Timeline Reporting` (`Yes` by default), `Timeline Review Severity` (`Alerts only` by default) and `Timeline Summary Wait (seconds)`, plus a read-only `Timeline Status`. On a system where the Timeline agent was never installed this is a silent no-op — the agent is looked up by `agent-timeline.c4z`, retried at most once a minute while absent, and looked for again 15s after load because agents are not always up when a driver is.

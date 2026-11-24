@@ -277,5 +277,78 @@ pcall(handleObjectDescription,
 check("an empty description is ignored",
       findSent("FRIGATE_OBJECT_DESCRIPTION") == nil)
 
+------------------------------------------------------------------------
+-- Zone topics are not cameras
+------------------------------------------------------------------------
+-- Frigate publishes zone counts on frigate/<zone>/<object>, the same shape
+-- as frigate/<camera>/<object>. Without the configured zone names, every
+-- zone looked like a camera that did not exist.
+local CONFIG = [[
+{"mqtt":{"host":"192.168.1.146","port":1883},
+ "cameras":{
+   "bbq":{"ffmpeg":{"inputs":[{"path":"rtsp://x","roles":["detect"]}]},
+          "detect":{"width":1280,"height":720},
+          "zones":{"valid_area":{"coordinates":"0,0,1,1"},
+                   "valid_area_bottom":{"coordinates":"0,0,1,1"}}},
+   "driveway":{"ffmpeg":{"inputs":[]},
+               "zones":{"street":{"coordinates":"0,0,1,1"}}},
+   "nozones":{"ffmpeg":{"inputs":[]}}}}
+]]
+buildZoneMap(CONFIG, { "bbq", "driveway", "nozones" })
+check("a camera's zones are mapped to it",
+      zoneToCamera["valid_area"] == "bbq"
+      and zoneToCamera["valid_area_bottom"] == "bbq",
+      tostring(zoneToCamera["valid_area"]))
+check("each camera's zones map to that camera",
+      zoneToCamera["street"] == "driveway", tostring(zoneToCamera["street"]))
+check("a camera with no zones adds none", zoneToCamera["nozones"] == nil)
+check("camera names are not treated as zones", zoneToCamera["bbq"] == nil)
+-- The walker must skip into zones only, not pick up sibling config keys.
+check("sibling config keys are not mistaken for zones",
+      zoneToCamera["ffmpeg"] == nil and zoneToCamera["detect"] == nil
+      and zoneToCamera["coordinates"] == nil,
+      tostring(zoneToCamera["detect"]))
+
+-- The live symptom: a zone count arriving as if it were a camera.
+sent = {}
+onMQTTMessageForTest("frigate/valid_area/person", "1")
+local z = findSent("FRIGATE_ZONE")
+check("a zone count is routed as a zone event", z ~= nil)
+check("it goes to the camera that owns the zone",
+      z and z.deviceId == 1586, z and z.deviceId)
+check("the zone name is forwarded", z and z.params.zone == "valid_area",
+      z and z.params.zone)
+check("the object type is forwarded", z and z.params.object_type == "person",
+      z and z.params.object_type)
+check("the count is forwarded as a number", z and z.params.count == 1,
+      z and z.params.count)
+check("a zone is never reported as an unmatched camera",
+      findSent("FRIGATE_DETECTION") == nil)
+
+-- Zero means the zone cleared, which the camera driver reads as an exit.
+sent = {}
+onMQTTMessageForTest("frigate/valid_area/person", "0")
+local zc = findSent("FRIGATE_ZONE")
+check("a cleared zone is forwarded with count 0",
+      zc and zc.params.count == 0, zc and zc.params.count)
+
+-- A real camera must still be routed as a camera.
+sent = {}
+onMQTTMessageForTest("frigate/bbq/person", "1")
+check("a camera count is still a detection", findSent("FRIGATE_DETECTION") ~= nil)
+check("a camera count is not a zone event", findSent("FRIGATE_ZONE") == nil)
+
+-- Other zone sub-topics must not fall through and look like a camera.
+sent = {}
+onMQTTMessageForTest("frigate/valid_area/person/active", "1")
+check("a zone's /active topic is swallowed, not mistaken for a camera",
+      #sent == 0, #sent)
+
+-- An unknown name is still an unmatched camera, which is the real warning.
+sent = {}
+onMQTTMessageForTest("frigate/not_a_thing/person", "1")
+check("an unknown name is still treated as a camera",
+      findSent("FRIGATE_ZONE") == nil)
+
 realWrite(failures == 0 and "\nALL PASS\n" or ("\n" .. failures .. " FAILURE(S)\n"))
 os.exit(failures == 0 and 0 or 1)

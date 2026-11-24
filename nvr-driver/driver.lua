@@ -78,6 +78,12 @@ local mqttClient = nil
 -- Track previous object counts to detect new vs update events
 local prevCounts = {}  -- { "camera/object" = count }
 
+-- Frigate publishes zone counts on frigate/<zone>/<object>, the same shape
+-- as frigate/<camera>/<object>. The topic alone cannot tell them apart, so
+-- the zone names are read from the config and the owning camera remembered.
+-- Without this a zone looks like a camera that does not exist.
+zoneToCamera = {}
+
 -- Track camera names seen via MQTT that aren't in managed_cameras
 local unmatchedCameras = {}  -- { camera_name = true }
 
@@ -255,6 +261,41 @@ local function jsonBool(json, key)
     return json:match(pattern) ~= nil
 end
 
+--- The balanced {...} object that `key` maps to, or nil.
+local function jsonObjectFor(text, key)
+    local escaped = key:gsub("(%W)", "%%%1")
+    local _, e = text:find('"' .. escaped .. '"%s*:%s*')
+    if not e then return nil end
+    return text:match("^%b{}", e + 1)
+end
+
+--- Top-level keys of a JSON object, in order. Values are skipped by brace
+--- and bracket depth, so only the object's own keys are returned.
+local function jsonKeysOf(obj)
+    if not obj or #obj < 2 then return {} end
+    local body, keys = obj:sub(2, -2), {}
+    local depth, pos = 0, 1
+    while pos <= #body do
+        local ch = body:sub(pos, pos)
+        if ch == "{" or ch == "[" then
+            depth = depth + 1
+        elseif ch == "}" or ch == "]" then
+            depth = depth - 1
+        elseif ch == '"' then
+            local keyEnd = body:find('"', pos + 1)
+            if not keyEnd then break end
+            -- A quoted token is a key only at depth 0 and only when a colon
+            -- follows; otherwise it is a string value.
+            if depth == 0 and body:match("^%s*:", keyEnd + 1) then
+                keys[#keys + 1] = body:sub(pos + 1, keyEnd - 1)
+            end
+            pos = keyEnd
+        end
+        pos = pos + 1
+    end
+    return keys
+end
+
 --- Extract a JSON array of strings as a comma-separated list.
 local function jsonStringArray(json, key)
     local body = json:match('"' .. key .. '"%s*:%s*%[([^%]]*)%]')
@@ -306,11 +347,10 @@ local function subscribeFrigateTopics()
         "frigate/+/dog",
         "frigate/+/cat",
         "frigate/+/motion",
-        -- Zone events: frigate/<camera>/<zone>/<object>
-        "frigate/+/+/person",
-        "frigate/+/+/car",
-        "frigate/+/+/dog",
-        "frigate/+/+/cat",
+        -- Zone counts arrive on frigate/<zone>/<object>, which the
+        -- frigate/+/<object> subscriptions above already cover. There is no
+        -- frigate/<camera>/<zone>/<object> topic; subscribing to it matched
+        -- nothing, which is why zone events never fired.
         -- Audio detection events (whitelist — excludes rms/dBFS telemetry that would flood Last Event)
         "frigate/+/audio/speech",
         "frigate/+/audio/bark",
@@ -453,6 +493,36 @@ function handleObjectDescription(payload)
     })
 end
 
+--- Map each configured zone to the camera that owns it.
+--- Zones live at cameras.<camera>.zones.<zone> in Frigate's config.
+function buildZoneMap(configJson, cameraNames)
+    local camerasObj = jsonObjectFor(configJson, "cameras")
+    if not camerasObj then return end
+
+    local map, count = {}, 0
+    for _, cam in ipairs(cameraNames or {}) do
+        local camObj = jsonObjectFor(camerasObj, cam)
+        if camObj then
+            for _, zone in ipairs(jsonKeysOf(jsonObjectFor(camObj, "zones"))) do
+                -- A zone name shared by two cameras is ambiguous on the wire,
+                -- because the topic names only the zone. First camera wins and
+                -- the clash is logged rather than silently resolved.
+                if map[zone] and map[zone] ~= cam then
+                    log(LOG_WARNING, "Zone '" .. zone .. "' is on both "
+                        .. map[zone] .. " and " .. cam
+                        .. " — its events will be attributed to " .. map[zone])
+                else
+                    map[zone] = cam
+                    count = count + 1
+                end
+            end
+        end
+    end
+
+    zoneToCamera = map
+    log(LOG_INFO, "Mapped " .. count .. " zone(s) to their cameras")
+end
+
 --- Main MQTT message handler. Routes messages to camera drivers.
 local function onMQTTMessage(obj, msgId, topic, payload, qos, retain)
     log(LOG_TRACE, "MQTT msg: " .. topic .. " = " .. tostring(payload))
@@ -496,6 +566,30 @@ local function onMQTTMessage(obj, msgId, topic, payload, qos, retain)
     end
 
     local camName = segments[2]
+
+    -- frigate/<zone>/<object> is indistinguishable from frigate/<camera>/<object>
+    -- by shape alone, so the configured zone names decide. A name that is both
+    -- a camera and a zone is treated as the camera, which is what the rest of
+    -- the driver assumes.
+    local zoneOwner = zoneToCamera[camName]
+    if zoneOwner and not getManagedCameras()[camName] then
+        if #segments == 3 then
+            local objType = segments[3]
+            if objType == "person" or objType == "car"
+               or objType == "dog" or objType == "cat" then
+                sendToCamera(zoneOwner, "FRIGATE_ZONE", {
+                    zone = camName, object_type = objType,
+                    count = tonumber(payload) or 0,
+                })
+                log(LOG_DEBUG, "Zone " .. camName .. "/" .. objType
+                    .. " = " .. tostring(payload) .. " on " .. zoneOwner)
+            end
+        end
+        -- frigate/<zone>/<object>/active and anything else under a zone is
+        -- not acted on, but it is a zone topic, so it must not fall through
+        -- and be reported as an unmatched camera.
+        return
+    end
 
     -- frigate/<camera>/detect/state or frigate/<camera>/recordings/state
     if #segments == 4 and segments[4] == "state" then
@@ -577,6 +671,12 @@ local function onMQTTMessage(obj, msgId, topic, payload, qos, retain)
         end
         return
     end
+end
+
+-- Test seam: the zone/camera ambiguity lives in the routing itself, so the
+-- suite drives whole topics through it rather than the handlers beneath.
+function onMQTTMessageForTest(topic, payload)
+    return onMQTTMessage(nil, 0, topic, payload, 0, false)
 end
 
 --- Connect (or reconnect) the MQTT client using C4:MQTT() API.
@@ -712,6 +812,10 @@ local function fetchCameras(callback)
                 pos = pos + 1
             end
         end
+
+        -- Zone names, so a frigate/<zone>/<object> message can be told from
+        -- a camera's and routed to the camera the zone belongs to.
+        buildZoneMap(strData, cameraNames)
 
         -- Update Frigate camera count
         C4:UpdateProperty(PROP_FRIGATE_COUNT, tostring(#cameraNames))
