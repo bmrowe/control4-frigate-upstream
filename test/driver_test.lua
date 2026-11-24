@@ -161,6 +161,10 @@ end
 ------------------------------------------------------------------------
 -- Person detected: variables, events, history, Last Event
 ------------------------------------------------------------------------
+-- Object detections are off by default now (they go to the Timeline), but
+-- this block exists to guard the OS 3.4.3 C4:RecordHistory behaviour from
+-- #24, so it switches them on rather than testing something weaker.
+Properties["Record Object Detections"] = "Yes"
 events, history = {}, {}
 local ok, err = pcall(ExecuteCommand, "FRIGATE_DETECTION",
     { object_type = "person", count = 1, event_type = "new" })
@@ -340,27 +344,34 @@ check("motion is recorded once switched on",
 Properties["Record Motion Events"] = nil
 
 -- The other categories keep the previous always-record behaviour.
+Properties["Record Object Detections"] = "Yes"
 history = {}
 ExecuteCommand("FRIGATE_DETECTION", { object_type = "person", count = 1, event_type = "new" })
-check("object detections record by default",
+check("object detections record once switched on",
       historyTypes()["Person Detected"] == true, #history)
-
-Properties["Record Object Detections"] = "No"
-history = {}
-ExecuteCommand("FRIGATE_DETECTION", { object_type = "person", count = 1, event_type = "new" })
-check("object detections can be switched off", #history == 0, #history)
 Properties["Record Object Detections"] = nil
 
-Properties["Record Zone Events"] = "No"
+Properties["Record Object Detections"] = nil
 history = {}
-ExecuteCommand("FRIGATE_ZONE", { zone = "driveway", object_type = "person", count = 1 })
-check("zone events can be switched off", #history == 0, #history)
-Properties["Record Zone Events"] = nil
+ExecuteCommand("FRIGATE_DETECTION", { object_type = "person", count = 1, event_type = "new" })
+check("object detections do not reach the history by default",
+      #history == 0, #history)
 
 history = {}
 ExecuteCommand("FRIGATE_ZONE", { zone = "driveway", object_type = "person", count = 1 })
-check("zone events record by default",
+check("zone events do not reach the history by default", #history == 0, #history)
+
+Properties["Record Zone Events"] = "Yes"
+history = {}
+ExecuteCommand("FRIGATE_ZONE", { zone = "driveway", object_type = "person", count = 1 })
+check("zone events record once switched on",
       historyTypes()["Zone Entered"] == true, #history)
+Properties["Record Zone Events"] = nil
+
+-- Audio and camera status are discrete and rare, so they stay on.
+history = {}
+ExecuteCommand("FRIGATE_AUDIO", { audio_type = "glass_breaking" })
+check("audio detections still record by default", #history > 0, #history)
 
 -- A switch gates what is written, never what Navigator can display: the
 -- registration must cover every type so turning one back on needs no reload.
@@ -378,8 +389,10 @@ check("audio and status types stay registered",
 -- No agent installed: the common case, and it must stay silent.
 timelineAgentId, timelinePayloads = nil, {}
 history = {}
+Properties["Record Object Detections"] = "Yes"
 local okNoAgent = pcall(ExecuteCommand, "FRIGATE_DETECTION",
     { object_type = "person", count = 1, event_type = "new" })
+Properties["Record Object Detections"] = nil
 check("a missing Timeline agent does not raise", okNoAgent)
 check("a missing Timeline agent sends nothing", #timelinePayloads == 0, #timelinePayloads)
 check("a missing Timeline agent still records history", #history > 0, #history)
@@ -396,13 +409,39 @@ check("the retry finds an agent that appeared late",
       (props["Timeline Status"] or ""):find("agent 4242") ~= nil,
       props["Timeline Status"])
 
--- Object detections feed the history, not the Timeline: the per-camera count
--- topics fire several times per incident, so they make a poor Timeline.
+-- The split: object detections clutter the history but suit the Timeline,
+-- so by default they reach one and not the other.
 timelinePayloads, history = {}, {}
 ExecuteCommand("FRIGATE_DETECTION", { object_type = "person", count = 1, event_type = "new" })
-check("an object detection records history but not a Timeline entry",
-      #history > 0 and #timelinePayloads == 0,
+check("an object detection reaches the Timeline, not the history",
+      #history == 0 and #timelinePayloads == 1,
       ("history=%d timeline=%d"):format(#history, #timelinePayloads))
+check("the Timeline entry names the object",
+      (timelinePayloads[1] or ""):find('"displayName":"Person detected"') ~= nil,
+      timelinePayloads[1])
+
+-- Arrivals only: "Person left" on a timeline says nothing.
+timelinePayloads = {}
+ExecuteCommand("FRIGATE_DETECTION", { object_type = "person", count = 0, event_type = "end" })
+check("a departure is not put on the Timeline", #timelinePayloads == 0,
+      #timelinePayloads)
+
+-- It has its own switch, independent of the history switches.
+Properties["Timeline Object Detections"] = "No"
+timelinePayloads = {}
+ExecuteCommand("FRIGATE_DETECTION", { object_type = "car", count = 1, event_type = "new" })
+check("Timeline object detections can be switched off alone",
+      #timelinePayloads == 0, #timelinePayloads)
+Properties["Timeline Object Detections"] = nil
+
+-- Turning them on in the history must not remove them from the Timeline.
+Properties["Record Object Detections"] = "Yes"
+timelinePayloads, history = {}, {}
+ExecuteCommand("FRIGATE_DETECTION", { object_type = "dog", count = 1, event_type = "new" })
+check("the two destinations are independent",
+      #history == 1 and #timelinePayloads == 1,
+      ("history=%d timeline=%d"):format(#history, #timelinePayloads))
+Properties["Record Object Detections"] = nil
 
 ------------------------------------------------------------------------
 -- Review segments drive the Timeline
@@ -661,6 +700,7 @@ check("the described object's own snapshot is fetched",
 check("the picture is attached to the description", #agentMetadata == 1, #agentMetadata)
 check("the description type is registered",
       registeredTypes["Object Described"] == true)
+check("the review type is registered", registeredTypes["Review Alert"] == true)
 check("a description does not also create a Timeline entry",
       #timelinePayloads == 0, #timelinePayloads)
 
@@ -669,12 +709,19 @@ ExecuteCommand("FRIGATE_OBJECT_DESCRIPTION", { id = "x", description = "" })
 check("an empty description is ignored",
       #history == 0 and #agentRecords == 0, #history + #agentRecords)
 
-Properties["Record Object Detections"] = "No"
+-- A description is one per tracked object, not per count transition, so it
+-- is not suppressed along with the raw detections.
 history, agentRecords = {}, {}
-ExecuteCommand("FRIGATE_OBJECT_DESCRIPTION", { id = "x", description = "Someone walked past." })
-check("descriptions follow the object-detection switch",
+ExecuteCommand("FRIGATE_OBJECT_DESCRIPTION", { id = "y", description = "Someone walked past." })
+check("descriptions are recorded although object detections are off",
+      #agentRecords == 1, #agentRecords)
+
+Properties["Record Object Descriptions"] = "No"
+history, agentRecords = {}, {}
+ExecuteCommand("FRIGATE_OBJECT_DESCRIPTION", { id = "z", description = "Someone walked past." })
+check("descriptions have their own switch",
       #history == 0 and #agentRecords == 0, #history + #agentRecords)
-Properties["Record Object Detections"] = nil
+Properties["Record Object Descriptions"] = nil
 
 os.execute("rm -rf " .. filesWrittenDir)
 

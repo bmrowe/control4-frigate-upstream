@@ -38,6 +38,7 @@ local PROP_NOTIFY_FRESHNESS = "Notification Image Freshness (seconds)"
 -- history is there for; that one defaults off and the rest keep the previous
 -- behaviour.
 local PROP_HIST_REVIEWS = "Record Review Incidents"
+local PROP_HIST_DESCRIBED = "Record Object Descriptions"
 local PROP_HIST_OBJECTS = "Record Object Detections"
 local PROP_HIST_MOTION  = "Record Motion Events"
 local PROP_HIST_ZONES   = "Record Zone Events"
@@ -48,6 +49,7 @@ local PROP_TIMELINE          = "Timeline Reporting"
 local PROP_TIMELINE_SEVERITY = "Timeline Review Severity"
 local PROP_TIMELINE_WAIT     = "Timeline Summary Wait (seconds)"
 local PROP_HIST_IMAGES       = "Attach Detection Images"
+local PROP_TIMELINE_OBJECTS  = "Timeline Object Detections"
 local PROP_TIMELINE_STATUS = "Timeline Status"
 
 -- The Timeline agent is a separate destination from the history: Navigator
@@ -300,7 +302,7 @@ local HISTORY_EVENTS = {
     -- Review incidents
     { "Review Alert", "reviews" },
     -- GenAI object descriptions
-    { "Object Described", "objects" },
+    { "Object Described", "descriptions" },
     -- State changes
     { "Detection Enabled", "status" }, { "Detection Disabled", "status" },
     { "Recording Enabled", "status" }, { "Recording Disabled", "status" },
@@ -310,7 +312,8 @@ local HISTORY_CATEGORY_OF = {}
 for _, e in ipairs(HISTORY_EVENTS) do HISTORY_CATEGORY_OF[e[1]] = e[2] end
 
 local HISTORY_CATEGORY_PROP = {
-    reviews = PROP_HIST_REVIEWS,
+    reviews      = PROP_HIST_REVIEWS,
+    descriptions = PROP_HIST_DESCRIBED,
     objects = PROP_HIST_OBJECTS,
     motion  = PROP_HIST_MOTION,
     zones   = PROP_HIST_ZONES,
@@ -320,9 +323,16 @@ local HISTORY_CATEGORY_PROP = {
 
 -- Default for a property Composer has not written yet. Only motion differs
 -- from the previous always-record behaviour.
+-- The history is for incidents. A review item is one per incident and
+-- carries a picture; the object-count and zone topics fire on every
+-- transition, so one walk up a drive becomes eight rows that bury it.
+-- Those default off and reach the Timeline instead. Audio detections and
+-- camera status are discrete and rare, so they stay on.
+-- A GenAI description is one per tracked object, not one per count
+-- transition, so it does not belong behind the object-detection switch.
 local HISTORY_CATEGORY_DEFAULT = {
-    reviews = true, objects = true, motion = false,
-    zones = true, audio = true, status = true,
+    reviews = true, descriptions = true, objects = false, motion = false,
+    zones = false, audio = true, status = true,
 }
 
 --- Whether this event type should be written to the history.
@@ -459,6 +469,15 @@ local function reportTimeline(eventType, ts)
         setTimelineStatus("Agent " .. tostring(timelineId)
             .. " rejected the last event")
     end
+end
+
+--- Report an object detection to the Timeline.
+--- The Timeline tolerates the per-object granularity that would clutter the
+--- history, so it is gated separately rather than following the history
+--- switches. Only arrivals: a "left" entry on a timeline says nothing.
+local function reportTimelineDetection(friendly)
+    if (Properties[PROP_TIMELINE_OBJECTS] or "Yes") ~= "Yes" then return end
+    reportTimeline(friendly .. " detected")
 end
 
 --- Describe the Timeline setup in Composer without waiting for a detection.
@@ -987,6 +1006,10 @@ local function handleDetection(tParams)
             fireEvent("Object Left")
             recordHistory(friendly .. " left", "Info", friendly .. " Left")
         end
+    end
+
+    if count > 0 and eventType == "new" then
+        reportTimelineDetection(friendly)
     end
 
     C4:UpdateProperty(PROP_LAST_EVENT, friendly .. (count > 0 and " detected" or " left") .. " — " .. ts)

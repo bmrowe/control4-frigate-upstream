@@ -165,6 +165,17 @@
         <description>Which Frigate review severities reach the Timeline. Alerts only keeps it to what Frigate considers worth looking at.</description>
       </property>
       <property>
+        <name>Timeline Object Detections</name>
+        <type>LIST</type>
+        <default>Yes</default>
+        <readonly>false</readonly>
+        <items>
+          <item>Yes</item>
+          <item>No</item>
+        </items>
+        <description>Also report individual object detections to the Timeline, alongside the review incidents. The Timeline tolerates this granularity where the History does not. Arrivals only — a "left" entry on a timeline says nothing.</description>
+      </property>
+      <property>
         <name>Timeline Summary Wait (seconds)</name>
         <type>LIST</type>
         <default>45</default>
@@ -208,7 +219,7 @@
         <description>Write one History entry per Frigate review incident, with the GenAI summary as its text and the incident's snapshot attached.</description>
       </property>
       <property>
-        <name>Record Object Detections</name>
+        <name>Record Object Descriptions</name>
         <type>LIST</type>
         <default>Yes</default>
         <readonly>false</readonly>
@@ -216,7 +227,18 @@
           <item>Yes</item>
           <item>No</item>
         </items>
-        <description>Write person, car, dog, cat and generic object detections to History.</description>
+        <description>Write Frigate's GenAI object descriptions to History, with the described object's snapshot attached. One per tracked object rather than per count transition, so this is separate from Record Object Detections.</description>
+      </property>
+      <property>
+        <name>Record Object Detections</name>
+        <type>LIST</type>
+        <default>No</default>
+        <readonly>false</readonly>
+        <items>
+          <item>Yes</item>
+          <item>No</item>
+        </items>
+        <description>Write person, car, dog, cat and generic object detections to History. Off by default: these fire on every count transition, so one incident becomes several rows and buries the review entry that already describes it. They reach the Timeline instead. Also covers GenAI object descriptions.</description>
       </property>
       <property>
         <name>Record Motion Events</name>
@@ -232,13 +254,13 @@
       <property>
         <name>Record Zone Events</name>
         <type>LIST</type>
-        <default>Yes</default>
+        <default>No</default>
         <readonly>false</readonly>
         <items>
           <item>Yes</item>
           <item>No</item>
         </items>
-        <description>Write zone entry, exit and loitering events to History.</description>
+        <description>Write zone entry, exit and loitering events to History. Off by default for the same reason as object detections; the zones involved are already named in the review entry.</description>
       </property>
       <property>
         <name>Record Audio Events</name>

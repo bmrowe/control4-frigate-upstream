@@ -20,11 +20,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **GenAI object descriptions are recorded in the history,** with the described object's own snapshot attached. `frigate/tracked_object_update` carries the generated text well after the detection it describes, so it is recorded as its own entry of type `Object Described` rather than amending one already written. It follows the `Record Object Detections` switch.
 
-- **Per-category history switches (camera driver).** Five new properties decide what reaches the history: `Record Object Detections`, `Record Motion Events`, `Record Zone Events`, `Record Audio Events` and `Record Camera Status`. They gate Timeline reporting too, so a category cannot flood one view while being suppressed in the other.
+- **Per-category history switches (camera driver).** Seven new properties decide what reaches the history: `Record Review Incidents`, `Record Object Descriptions`, `Record Object Detections`, `Record Motion Events`, `Record Zone Events`, `Record Audio Events` and `Record Camera Status`. The Timeline has its own switches and is unaffected by these.
 
 ### Changed
 
-- **Motion is no longer written to the history by default.** Frigate publishes `frigate/<camera>/motion` on every transition, so each camera with any traffic wrote a continuous stream of `Motion Detected` / `Motion Stopped` rows, burying the object detections the history exists for. Set `Record Motion Events` to `Yes` to restore the previous behaviour. The Composer event still fires either way, so programming that reacts to motion is unaffected.
+- **The history holds incidents; the Timeline holds everything.** Frigate's object-count, motion and zone topics fire on every transition, so one walk up a drive wrote eight rows that buried the single review entry already describing it — with a picture. `Record Object Detections`, `Record Motion Events` and `Record Zone Events` now all default to `No`, and those detections go to the Timeline instead, which tolerates that granularity. Audio detections and camera status are discrete and rare, so they stay on. Set any switch to `Yes` to restore the previous behaviour; the Composer events still fire either way, so programming is unaffected.
+
+- **New camera property `Timeline Object Detections`** (`Yes` by default) reports individual object detections to the Timeline alongside the review incidents, arrivals only. The Timeline and history are now gated independently — turning a category on in one does not change the other.
 
 - **History event types are registered from the same table that categorises them**, rather than a second list kept in step by hand. Every type stays registered whatever the switches say — they decide what gets written, not what Navigator can display — so switching a category back on needs no re-registration.
 
