@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **`frigate/available` = `online` raised instead of refreshing status.** `checkStatus` is a local defined below the MQTT router that calls it, so that call resolved to a global that is never set: every time Frigate came back, the driver logged `attempt to call global 'checkStatus' (a nil value)` and skipped the REST refresh. A Lua driver is read top to bottom, so this fails only when the branch is reached — the test suite now drives every topic shape through the router.
+
+- **`Unmatched Cameras` showed names from a previous run.** Properties persist in the project database, but the table behind this one does not survive a reload, and nothing put the two back in step at startup. The list on screen was whatever the last run wrote, including names a newer driver no longer considers unmatched. It is now reset at init.
+
 - **Zones were treated as cameras, and zone events never fired.** Frigate publishes zone counts on `frigate/<zone_name>/<object_name>` — the same shape as `frigate/<camera_name>/<object_name>` — so every zone arrived looking like a camera that did not exist and was listed under `Unmatched Cameras`. Meanwhile the driver subscribed to `frigate/+/+/<object>` for zones, a topic Frigate does not publish, so the zone handler was never reached. The NVR now reads the configured zone names from `cameras.<camera>.zones` in `/api/config` and routes a zone's counts to the camera that owns it; the dead subscription is gone. A zone name used on two cameras is ambiguous on the wire — the topic names only the zone — so the first camera wins and the clash is logged rather than silently resolved.
 
 ### Added

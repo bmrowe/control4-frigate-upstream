@@ -372,5 +372,54 @@ onMQTTMessageForTest("frigate/not_a_thing/person", "1")
 check("an unknown name is still treated as a camera",
       findSent("FRIGATE_ZONE") == nil)
 
+------------------------------------------------------------------------
+-- Every topic shape survives the router
+------------------------------------------------------------------------
+-- A driver.lua is read top to bottom, so a local defined below its caller
+-- is a global that was never set: the call raises only when that branch is
+-- reached. frigate/available = online did exactly that in a shipped build,
+-- because checkStatus is defined after the router that calls it. Driving
+-- every topic shape through the router is what catches it.
+buildZoneMap(CONFIG, { "bbq", "driveway", "nozones" })
+local topics = {
+    { "frigate/available",                    "online" },
+    { "frigate/available",                    "offline" },
+    { "frigate/events",                       '{"type":"new","after":{"camera":"bbq","label":"person"}}' },
+    { "frigate/reviews",                      '{"type":"end","after":{"id":"r","camera":"bbq","severity":"alert","start_time":1,"data":{"objects":["person"]}}}' },
+    { "frigate/tracked_object_update",        '{"type":"description","id":"e","camera":"bbq","description":"text"}' },
+    { "frigate/bbq/person",                   "1" },
+    { "frigate/bbq/person",                   "0" },
+    { "frigate/bbq/car",                      "2" },
+    { "frigate/bbq/motion",                   "ON" },
+    { "frigate/bbq/motion",                   "OFF" },
+    { "frigate/bbq/detect/state",             "ON" },
+    { "frigate/bbq/recordings/state",         "OFF" },
+    { "frigate/bbq/audio/speech",             "1" },
+    { "frigate/bbq/audio/rms",                "0.4" },
+    { "frigate/valid_area/person",            "1" },
+    { "frigate/valid_area/person/active",     "1" },
+    { "frigate/unknown_thing/person",         "1" },
+    -- Shapes the driver should ignore without raising.
+    { "frigate/available",                    "" },
+    { "frigate/events",                       "" },
+    { "frigate/reviews",                      "not json" },
+    { "frigate/tracked_object_update",        "" },
+    { "frigate",                              "x" },
+    { "notfrigate/bbq/person",                "1" },
+    { "frigate/bbq",                          "1" },
+    { "frigate/bbq/person/extra/deep",        "1" },
+}
+local brokeTopics = {}
+for _, t in ipairs(topics) do
+    sent = {}
+    local okT, errT = pcall(onMQTTMessageForTest, t[1], t[2])
+    if not okT then
+        brokeTopics[#brokeTopics + 1] = t[1] .. " = '" .. tostring(t[2])
+                                        .. "' -> " .. tostring(errT)
+    end
+end
+check("every MQTT topic shape survives the router", #brokeTopics == 0,
+      table.concat(brokeTopics, " | "))
+
 realWrite(failures == 0 and "\nALL PASS\n" or ("\n" .. failures .. " FAILURE(S)\n"))
 os.exit(failures == 0 and 0 or 1)

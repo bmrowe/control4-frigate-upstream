@@ -84,6 +84,12 @@ local prevCounts = {}  -- { "camera/object" = count }
 -- Without this a zone looks like a camera that does not exist.
 zoneToCamera = {}
 
+-- Forward declaration: the MQTT router refreshes status when Frigate comes
+-- back, but checkStatus needs the API helpers and so is defined below it.
+-- Without this the call resolves to a global that is never set, and
+-- frigate/available = online raises instead of refreshing.
+local checkStatus
+
 -- Track camera names seen via MQTT that aren't in managed_cameras
 local unmatchedCameras = {}  -- { camera_name = true }
 
@@ -912,7 +918,7 @@ local function autoPopulateMQTT()
     end)
 end
 
-local function checkStatus()
+function checkStatus()
     local base = apiBaseURL()
     if not base then
         setStatus("Not Configured — set Frigate Host")
@@ -1564,6 +1570,11 @@ function OnDriverLateInit()
     log(LOG_INFO, "Driver initializing — release " .. DRIVER_RELEASE)
     reconcileCameras()
     adoptOrphanCameras()
+    -- Properties persist in the project database but unmatchedCameras does
+    -- not survive a reload, so the list on screen was whatever the previous
+    -- run last wrote -- including names a newer driver no longer considers
+    -- unmatched. Put the two back in step before anything else writes it.
+    updateUnmatchedDisplay()
     checkStatus()
     refreshFrigateCameraCount()
     connectMQTT()
