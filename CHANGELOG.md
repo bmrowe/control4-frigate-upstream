@@ -8,7 +8,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
-- **Timeline agent reporting (camera driver).** Detections are now reported to the Control4 Timeline agent via `SetPastEvent`, which Navigator renders as its own scrubbing view, separate from the history. New camera property `Timeline Reporting` (`Yes` by default) and a read-only `Timeline Status` that says whether it is actually working. On a system where the Timeline agent was never installed this is a silent no-op — the agent is looked up by `agent-timeline.c4z`, retried once a minute while absent, and looked for again 15s after load because agents are not always up when a driver is.
+- **Timeline agent reporting, driven by review items.** The Control4 Timeline agent is a separate destination from the history — Navigator renders it as its own scrubbing view — and the driver never wrote to it, so that view stayed empty on every install. It is now fed from `frigate/reviews`: one entry per incident, rather than one per object-count transition. New camera properties `Timeline Reporting` (`Yes` by default), `Timeline Review Severity` (`Alerts only` by default) and `Timeline Summary Wait (seconds)`, plus a read-only `Timeline Status`. On a system where the Timeline agent was never installed this is a silent no-op — the agent is looked up by `agent-timeline.c4z`, retried at most once a minute while absent, and looked for again 15s after load because agents are not always up when a driver is.
+
+- **GenAI review summaries title the Timeline entry (#new).** Where Frigate is configured with [review summaries](https://docs.frigate.video/configuration/genai/review_summaries), the entry reads "Person taking out trash" rather than "person". Frigate ends a review before its summary exists and publishes the summary as a separate `genai` message, so an ended review is held for `Timeline Summary Wait (seconds)` (45 by default) to see whether a title arrives; otherwise the detected object list is used, with any recognised face named alongside it. Waiting does not move the entry — it carries the review's own start time. Set the wait to `Off` where review summaries are not configured.
+
+- **New MQTT subscriptions: `frigate/reviews` and `frigate/tracked_object_update` (NVR driver).** Neither was subscribed before, so review items and everything GenAI produced were invisible to Control4. Only the terminal `end` and `genai` review messages are forwarded; `new` and `update` are interim states of the same incident.
+
+- **GenAI object descriptions are recorded in the history.** `frigate/tracked_object_update` carries the generated text well after the detection it describes, so it is recorded as its own entry of type `Object Described` rather than amending one already written. It follows the `Record Object Detections` switch.
 
 - **Per-category history switches (camera driver).** Five new properties decide what reaches the history: `Record Object Detections`, `Record Motion Events`, `Record Zone Events`, `Record Audio Events` and `Record Camera Status`. They gate Timeline reporting too, so a category cannot flood one view while being suppressed in the other.
 
@@ -18,7 +24,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **History event types are registered from the same table that categorises them**, rather than a second list kept in step by hand. Every type stays registered whatever the switches say — they decide what gets written, not what Navigator can display — so switching a category back on needs no re-registration.
 
-- Camera driver bumped to v45.
+- Camera driver bumped to v45, NVR driver bumped to v50.
 
 ## [0.9.0-rc.1] - 2026-08-14
 

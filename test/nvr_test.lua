@@ -151,5 +151,131 @@ check("loitering still detected", loiter ~= nil)
 check("loitering zone forwarded", loiter and loiter.params.zone == "driveway",
       loiter and loiter.params.zone)
 
+------------------------------------------------------------------------
+-- frigate/reviews
+------------------------------------------------------------------------
+-- A review segment that has just ended, before any GenAI summary exists.
+sent = {}
+local okEnd = pcall(handleReviewJSON, [[
+{"type":"end",
+ "before":{"id":"1755012345.1-rev","camera":"bbq","severity":"alert",
+           "start_time":1755012345.5,"end_time":null,
+           "data":{"objects":["person"],"sub_labels":[],"zones":["driveway"],
+                   "detections":["1755012345.1-abc"]}},
+ "after":{"id":"1755012345.1-rev","camera":"bbq","severity":"alert",
+          "start_time":1755012345.5,"end_time":1755012399.0,
+          "data":{"objects":["person","car"],"sub_labels":["Joe"],
+                  "zones":["driveway","street"],
+                  "detections":["1755012345.1-abc"]}}}
+]])
+check("handleReviewJSON does not raise", okEnd, err)
+local rev = findSent("FRIGATE_REVIEW")
+check("sends FRIGATE_REVIEW", rev ~= nil)
+check("routed to the camera's device id", rev and rev.deviceId == 1586,
+      rev and rev.deviceId)
+check("forwards the review id",
+      rev and rev.params.id == "1755012345.1-rev", rev and rev.params.id)
+check("forwards the message type", rev and rev.params.review_type == "end")
+check("forwards the severity", rev and rev.params.severity == "alert")
+-- Fields must come from `after`, not the first match inside `before`.
+check("objects come from after, not before",
+      rev and rev.params.objects == "person, car", rev and rev.params.objects)
+check("sub labels come from after",
+      rev and rev.params.sub_labels == "Joe", rev and rev.params.sub_labels)
+check("zones come from after",
+      rev and rev.params.zones == "driveway, street", rev and rev.params.zones)
+check("start time is forwarded as a number",
+      rev and rev.params.start_time == 1755012345.5, rev and rev.params.start_time)
+check("no summary yet", rev and rev.params.title == "", rev and rev.params.title)
+
+-- The GenAI summary, published separately once it has been generated.
+sent = {}
+pcall(handleReviewJSON, [[
+{"type":"genai",
+ "before":{"id":"1755012345.1-rev","camera":"bbq","severity":"alert",
+           "start_time":1755012345.5,
+           "data":{"objects":["person"],"sub_labels":[],"zones":[]}},
+ "after":{"id":"1755012345.1-rev","camera":"bbq","severity":"alert",
+          "start_time":1755012345.5,
+          "data":{"objects":["person"],"sub_labels":[],"zones":[],
+                  "metadata":{"title":"Person taking out trash",
+                              "scene":"A person walks from the side gate...",
+                              "shortSummary":"Someone took the bins out.",
+                              "confidence":0.92,"other_concerns":[],
+                              "potential_threat_level":0}}}}
+]])
+local gen = findSent("FRIGATE_REVIEW")
+check("the genai message is forwarded", gen ~= nil)
+check("message type is genai", gen and gen.params.review_type == "genai")
+check("the title is extracted from data.metadata",
+      gen and gen.params.title == "Person taking out trash", gen and gen.params.title)
+check("the short summary is extracted",
+      gen and gen.params.summary == "Someone took the bins out.", gen and gen.params.summary)
+check("the threat level is extracted",
+      gen and gen.params.threat_level == 0, gen and gen.params.threat_level)
+
+-- A raised threat level must survive, not be read as the default.
+sent = {}
+pcall(handleReviewJSON, [[
+{"type":"genai","before":{},
+ "after":{"id":"r2","camera":"bbq","severity":"alert","start_time":1,
+          "data":{"objects":["person"],
+                  "metadata":{"title":"Someone trying door handles",
+                              "shortSummary":"A person tried several doors.",
+                              "potential_threat_level":2}}}}
+]])
+local threat = findSent("FRIGATE_REVIEW")
+check("a raised threat level is forwarded",
+      threat and threat.params.threat_level == 2, threat and threat.params.threat_level)
+
+-- Interim messages are noise: one incident should not produce several entries.
+sent = {}
+pcall(handleReviewJSON, [[
+{"type":"new","before":{},"after":{"id":"r3","camera":"bbq","severity":"alert",
+ "start_time":1,"data":{"objects":["person"]}}}
+]])
+check("a 'new' review is not forwarded", findSent("FRIGATE_REVIEW") == nil)
+sent = {}
+pcall(handleReviewJSON, [[
+{"type":"update","before":{},"after":{"id":"r3","camera":"bbq","severity":"alert",
+ "start_time":1,"data":{"objects":["person"]}}}
+]])
+check("an 'update' review is not forwarded", findSent("FRIGATE_REVIEW") == nil)
+
+sent = {}
+check("a review with no camera does not raise",
+      pcall(handleReviewJSON, [[{"type":"end","after":{"id":"r4","severity":"alert"}}]]))
+check("a review with no camera is dropped", findSent("FRIGATE_REVIEW") == nil)
+check("an empty review payload does not raise", pcall(handleReviewJSON, ""))
+
+------------------------------------------------------------------------
+-- frigate/tracked_object_update
+------------------------------------------------------------------------
+sent = {}
+local okDesc = pcall(handleObjectDescription,
+  [[{"type":"description","id":"1755012345.1-abc","camera":"bbq",
+     "description":"A delivery driver leaves a parcel by the door."}]])
+check("handleObjectDescription does not raise", okDesc)
+local desc = findSent("FRIGATE_OBJECT_DESCRIPTION")
+check("sends FRIGATE_OBJECT_DESCRIPTION", desc ~= nil)
+check("routed to the camera's device id", desc and desc.deviceId == 1586)
+check("forwards the description text",
+      desc and desc.params.description == "A delivery driver leaves a parcel by the door.",
+      desc and desc.params.description)
+check("forwards the tracked object id",
+      desc and desc.params.id == "1755012345.1-abc", desc and desc.params.id)
+
+-- tracked_object_update carries other types too; only descriptions matter here.
+sent = {}
+pcall(handleObjectDescription,
+  [[{"type":"end","id":"1755012345.1-abc","camera":"bbq"}]])
+check("a non-description update is ignored",
+      findSent("FRIGATE_OBJECT_DESCRIPTION") == nil)
+sent = {}
+pcall(handleObjectDescription,
+  [[{"type":"description","id":"x","camera":"bbq","description":""}]])
+check("an empty description is ignored",
+      findSent("FRIGATE_OBJECT_DESCRIPTION") == nil)
+
 realWrite(failures == 0 and "\nALL PASS\n" or ("\n" .. failures .. " FAILURE(S)\n"))
 os.exit(failures == 0 and 0 or 1)

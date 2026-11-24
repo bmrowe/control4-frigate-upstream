@@ -43,7 +43,9 @@ local PROP_HIST_ZONES   = "Record Zone Events"
 local PROP_HIST_AUDIO   = "Record Audio Events"
 local PROP_HIST_STATUS  = "Record Camera Status"
 
-local PROP_TIMELINE        = "Timeline Reporting"
+local PROP_TIMELINE          = "Timeline Reporting"
+local PROP_TIMELINE_SEVERITY = "Timeline Review Severity"
+local PROP_TIMELINE_WAIT     = "Timeline Summary Wait (seconds)"
 local PROP_TIMELINE_STATUS = "Timeline Status"
 
 -- The Timeline agent is a separate destination from the history: Navigator
@@ -293,6 +295,8 @@ local HISTORY_EVENTS = {
     { "Audio: Fire Alarm", "audio" }, { "Audio: Glass Breaking", "audio" },
     { "Audio: Siren", "audio" }, { "Audio: Car Horn", "audio" },
     { "Audio: Music", "audio" },
+    -- GenAI object descriptions
+    { "Object Described", "objects" },
     -- State changes
     { "Detection Enabled", "status" }, { "Detection Disabled", "status" },
     { "Recording Enabled", "status" }, { "Recording Disabled", "status" },
@@ -469,6 +473,116 @@ local function refreshTimelineStatus()
     end
 end
 
+------------------------------------------------------------------------
+-- Review segments
+------------------------------------------------------------------------
+--
+-- A review segment is one incident. Object-count topics fire several times
+-- per incident, so they make a poor Timeline: a single "Person taking out
+-- trash" beats eight rows of "Person Detected". Frigate ends a segment
+-- before its GenAI summary exists, so an ended segment is held briefly to
+-- see whether a title arrives; the Timeline entry is stamped with the
+-- segment's own start time, so the wait does not move it.
+
+-- Reported ids are remembered only to suppress the duplicate that arrives
+-- when a held review's timer fires after its summary already did. A driver
+-- runs for months, so the set is bounded rather than left to grow.
+local REVIEW_SEEN_MAX = 200
+local reviewSeen      = {}   -- review id -> sequence number
+local reviewSeenCount = 0
+local reviewSeenSeq   = 0
+local reviewPending   = {}   -- review id -> { timer, params }
+
+local function rememberReview(id)
+    if reviewSeen[id] then return end
+    reviewSeenSeq   = reviewSeenSeq + 1
+    reviewSeen[id]  = reviewSeenSeq
+    reviewSeenCount = reviewSeenCount + 1
+    if reviewSeenCount <= REVIEW_SEEN_MAX then return end
+    -- Drop the oldest half, so trimming is occasional rather than per-event.
+    local cutoff = reviewSeenSeq - (REVIEW_SEEN_MAX / 2)
+    for k, seq in pairs(reviewSeen) do
+        if seq <= cutoff then
+            reviewSeen[k] = nil
+            reviewSeenCount = reviewSeenCount - 1
+        end
+    end
+end
+
+local function reviewWaitSeconds()
+    local raw = Properties[PROP_TIMELINE_WAIT]
+    if raw == nil or raw == "" then return 45 end
+    if raw == "Off" then return 0 end
+    return tonumber(raw) or 45
+end
+
+-- Test seam: the harness asserts the set stays bounded over a long run.
+function reviewSeenForTest() return reviewSeen end
+
+--- What to call this incident on the Timeline.
+--- The GenAI title when there is one, otherwise the objects Frigate saw.
+local function reviewLabel(p)
+    local title = p.title
+    if title and title ~= "" then return title end
+    local objects = p.objects
+    if objects and objects ~= "" then
+        local subs = p.sub_labels
+        if subs and subs ~= "" then return subs .. " (" .. objects .. ")" end
+        return objects
+    end
+    return "Activity"
+end
+
+local function emitReview(id, p)
+    if reviewSeen[id] then return end
+    rememberReview(id)
+    reviewPending[id] = nil
+    reportTimeline(reviewLabel(p), tonumber(p.start_time))
+end
+
+--- Handle a review segment forwarded by the NVR.
+--- tParams: { id, review_type, severity, start_time, end_time,
+---            objects, sub_labels, zones, title, summary, threat_level }
+local function handleReview(tParams)
+    local id = tParams.id or ""
+    if id == "" then return end
+
+    local wanted = Properties[PROP_TIMELINE_SEVERITY] or "Alerts only"
+    local severity = tParams.severity or ""
+    if wanted == "Alerts only" and severity ~= "alert" then
+        log(LOG_DEBUG, "Review " .. id .. " is a " .. severity .. " — skipping")
+        return
+    end
+
+    -- The summary landed: report now with the title, cancelling any wait.
+    if (tParams.review_type or "") == "genai" then
+        local pending = reviewPending[id]
+        if pending and pending.timer then pcall(C4.KillTimer, C4, pending.timer) end
+        emitReview(id, tParams)
+        return
+    end
+
+    if reviewSeen[id] or reviewPending[id] then return end
+
+    local wait = reviewWaitSeconds()
+    if wait <= 0 then
+        emitReview(id, tParams)
+        return
+    end
+
+    -- Hold for a summary. If none arrives, the object list is a fair label.
+    local entry = { params = tParams }
+    reviewPending[id] = entry
+    entry.timer = C4:SetTimer(wait * 1000, function()
+        local held = reviewPending[id]
+        if held then
+            log(LOG_DEBUG, "Review " .. id .. ": no summary after "
+                .. wait .. "s — reporting the object list")
+            emitReview(id, held.params)
+        end
+    end)
+end
+
 --- Record an event in the history database.
 ---
 --- Signature per the DriverWorks API reference (Helper Interface, 1.6.0+):
@@ -500,9 +614,6 @@ local function recordHistory(message, severity, eventType)
         return
     end
 
-    -- Same gate, second destination. The Timeline is a separate view from the
-    -- history, so an event worth one is worth the other.
-    reportTimeline(eventType)
 
     local function record(...)
         local ok, uuid = pcall(C4.RecordHistory, C4, ...)
@@ -533,6 +644,15 @@ local function recordHistory(message, severity, eventType)
         .. "' — plain form: " .. (err or "nil UUID")
         .. "; with metadata: " .. (err2 or "nil UUID")
         .. ". Check the History agent is installed and running.")
+end
+
+--- Handle a GenAI description of a tracked object, forwarded by the NVR.
+--- It arrives long after the detection, so it is its own history entry
+--- rather than an amendment to one already written.
+local function handleObjectDescription(tParams)
+    local description = tParams.description or ""
+    if description == "" then return end
+    recordHistory(description, "Info", "Object Described")
 end
 
 ------------------------------------------------------------------------
@@ -1071,6 +1191,10 @@ function ExecuteCommand(sCommand, tParams)
         handleHealth(tParams or {})
     elseif sCommand == "FRIGATE_AUDIO" then
         handleAudio(tParams or {})
+    elseif sCommand == "FRIGATE_REVIEW" then
+        handleReview(tParams)
+    elseif sCommand == "FRIGATE_OBJECT_DESCRIPTION" then
+        handleObjectDescription(tParams)
     elseif sCommand == "FRIGATE_STATE" then
         handleStateChange(tParams or {})
     elseif sCommand == "IDENTIFY_CAMERA" then

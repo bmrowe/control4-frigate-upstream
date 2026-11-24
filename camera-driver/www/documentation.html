@@ -138,7 +138,21 @@
   <h3>Timeline</h3>
   <p>The Control4 <b>Timeline agent</b> is a separate view from the history — Navigator renders it as
   its own scrubbing timeline. With <code>Timeline Reporting</code> set to <code>Yes</code> (the
-  default) each recorded detection is also reported there.</p>
+  default) it is fed from Frigate's <b>review items</b>: one entry per incident, rather than one per
+  object-count transition. A single incident that produces eight <code>Person Detected</code> history
+  rows produces one Timeline entry.</p>
+
+  <p>Where Frigate is configured with <a href="https://docs.frigate.video/configuration/genai/review_summaries">GenAI
+  review summaries</a>, that entry is titled with the generated summary — <i>"Person taking out
+  trash"</i> rather than <i>"person"</i>. Frigate ends a review before its summary exists and
+  publishes the summary in a later message, so an ended review is held for
+  <code>Timeline Summary Wait (seconds)</code> (45 by default) to see whether a title arrives; if none
+  does, the detected object list is used, with any recognised face named alongside it
+  (<i>"Joe (person)"</i>). Waiting does not move the entry — it is stamped with the review's own start
+  time. Set the wait to <code>Off</code> if GenAI review summaries are not configured.</p>
+
+  <p><code>Timeline Review Severity</code> chooses which review severities qualify. The default,
+  <code>Alerts only</code>, keeps the Timeline to what Frigate itself considers worth looking at.</p>
 
   <p>This needs the Timeline agent (<code>agent-timeline.c4z</code>) to be in the project. Where it is
   not, reporting is a silent no-op and <code>Timeline Status</code> says so. Because agents are not
@@ -147,7 +161,15 @@
   happening: whether the agent was found, whether it accepted the last event, and whether this
   driver's package name matches what the agent expects.</p>
 
-  <p>The category switches above gate the Timeline as well, so motion does not flood it either.</p>
+  <p>This needs the NVR driver to be subscribed to <code>frigate/reviews</code>, which it is from
+  v50 onwards. The history category switches above do not apply to the Timeline: a review item is not
+  an object detection, and the two views are fed independently.</p>
+
+  <h3>GenAI object descriptions</h3>
+  <p>Where Frigate is configured with GenAI object descriptions, the generated text arrives well after
+  the detection it describes. It is recorded as its own history entry of type
+  <code>Object Described</code>, rather than amending an entry already written, and follows the
+  <code>Record Object Detections</code> switch.</p>
 
   <h2>Requirements</h2>
   <ul>

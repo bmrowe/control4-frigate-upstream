@@ -356,60 +356,165 @@ runTimers()                          -- the agent came up after the driver did
 check("the retry finds an agent that appeared late",
       (props["Timeline Status"] or ""):find("agent 4242") ~= nil,
       props["Timeline Status"])
-history = {}
+
+-- Object detections feed the history, not the Timeline: the per-camera count
+-- topics fire several times per incident, so they make a poor Timeline.
+timelinePayloads, history = {}, {}
 ExecuteCommand("FRIGATE_DETECTION", { object_type = "person", count = 1, event_type = "new" })
-check("a detection reaches the Timeline agent", #timelinePayloads > 0, #timelinePayloads)
+check("an object detection records history but not a Timeline entry",
+      #history > 0 and #timelinePayloads == 0,
+      ("history=%d timeline=%d"):format(#history, #timelinePayloads))
 
-local payload = timelinePayloads[1] or ""
-check("the payload names this driver's own package",
-      payload:find('"fileName":"frigate%-camera%.c4z"') ~= nil, payload)
-check("the payload carries this device id",
-      payload:find('"deviceId":1586') ~= nil, payload)
-check("the payload names the event",
-      payload:find('"displayName":"Person Detected"') ~= nil, payload)
-check("the payload carries an integer timestamp",
-      payload:match('"timestamp":(%d+)') ~= nil, payload)
-check("the payload carries a v4 uuid",
-      payload:match('"id":"%x+%-%x+%-4%x+%-%x+%-%x+"') ~= nil, payload)
-check("it was sent to the agent as SetPastEvent",
-      sentToDevice[#sentToDevice].id == 4242
-      and sentToDevice[#sentToDevice].cmd == "SetPastEvent")
+------------------------------------------------------------------------
+-- Review segments drive the Timeline
+------------------------------------------------------------------------
+local function review(t)
+    local p = {
+        id = t.id or "rev1", review_type = t.review_type or "end",
+        severity = t.severity or "alert",
+        start_time = t.start_time or 1755012345,
+        objects = t.objects or "person", sub_labels = t.sub_labels or "",
+        title = t.title or "", summary = t.summary or "",
+        threat_level = t.threat_level or 0,
+    }
+    ExecuteCommand("FRIGATE_REVIEW", p)
+end
 
--- Two detections must not share an event id.
-timelinePayloads = {}
-ExecuteCommand("FRIGATE_DETECTION", { object_type = "car", count = 1, event_type = "new" })
-ExecuteCommand("FRIGATE_DETECTION", { object_type = "dog", count = 1, event_type = "new" })
-local id1 = (timelinePayloads[1] or ""):match('"id":"([^"]+)"')
-local id2 = (timelinePayloads[2] or ""):match('"id":"([^"]+)"')
-check("each event gets a distinct id", id1 and id2 and id1 ~= id2,
-      tostring(id1) .. " / " .. tostring(id2))
+-- An ended review is held for its summary rather than reported at once.
+Properties["Timeline Summary Wait (seconds)"] = "45"
+timelinePayloads, timerCallbacks = {}, {}
+review({ id = "rev-hold" })
+check("an ended review is not reported immediately", #timelinePayloads == 0)
+check("it is held on a timer", #timerCallbacks > 0)
 
--- The category switches gate the Timeline as well, so motion cannot flood it.
-timelinePayloads = {}
-ExecuteCommand("FRIGATE_MOTION", { active = true })
-check("suppressed motion does not reach the Timeline either",
+-- The summary arrives before the wait expires: its title is what gets used.
+review({ id = "rev-hold", review_type = "genai", title = "Person taking out trash" })
+check("the summary is reported as soon as it lands", #timelinePayloads == 1,
+      #timelinePayloads)
+check("the GenAI title is the Timeline label",
+      (timelinePayloads[1] or ""):find('"displayName":"Person taking out trash"') ~= nil,
+      timelinePayloads[1])
+check("the entry is stamped with the review's own start time, not now",
+      (timelinePayloads[1] or ""):find('"timestamp":1755012345') ~= nil,
+      timelinePayloads[1])
+
+-- The held timer still fires afterwards; it must not report a second time.
+runTimers()
+check("the expired hold does not double-report", #timelinePayloads == 1,
+      #timelinePayloads)
+
+-- A repeat of the same review id is ignored.
+review({ id = "rev-hold", review_type = "genai", title = "Person taking out trash" })
+check("a repeated review id is reported once", #timelinePayloads == 1,
+      #timelinePayloads)
+
+-- No summary arrives: the object list is the label.
+timelinePayloads, timerCallbacks = {}, {}
+review({ id = "rev-nogenai", objects = "person, car" })
+runTimers()
+check("without a summary the object list is used", #timelinePayloads == 1,
+      #timelinePayloads)
+check("the object list is the Timeline label",
+      (timelinePayloads[1] or ""):find('"displayName":"person, car"') ~= nil,
+      timelinePayloads[1])
+
+-- A recognised face is worth naming.
+timelinePayloads, timerCallbacks = {}, {}
+review({ id = "rev-sub", objects = "person", sub_labels = "Joe" })
+runTimers()
+check("a sub label is named alongside the object",
+      (timelinePayloads[1] or ""):find('"displayName":"Joe %(person%)"') ~= nil,
+      timelinePayloads[1])
+
+-- Detections are below the bar by default.
+timelinePayloads, timerCallbacks = {}, {}
+review({ id = "rev-det", severity = "detection" })
+runTimers()
+check("a review detection is skipped under 'Alerts only'",
       #timelinePayloads == 0, #timelinePayloads)
 
--- Its own master switch.
+Properties["Timeline Review Severity"] = "Alerts and detections"
+timelinePayloads, timerCallbacks = {}, {}
+review({ id = "rev-det2", severity = "detection" })
+runTimers()
+check("a review detection is reported when both are wanted",
+      #timelinePayloads == 1, #timelinePayloads)
+Properties["Timeline Review Severity"] = nil
+
+-- Wait Off reports the moment the review ends.
+Properties["Timeline Summary Wait (seconds)"] = "Off"
+timelinePayloads, timerCallbacks = {}, {}
+review({ id = "rev-nowait" })
+check("wait Off reports without holding", #timelinePayloads == 1, #timelinePayloads)
+Properties["Timeline Summary Wait (seconds)"] = "45"
+
+-- A review with no id cannot be deduplicated, so it is dropped.
+timelinePayloads, timerCallbacks = {}, {}
+local okNoId = pcall(ExecuteCommand, "FRIGATE_REVIEW", { severity = "alert" })
+check("a review without an id is dropped rather than raising", okNoId)
+check("a review without an id reports nothing", #timelinePayloads == 0)
+
+-- Its own master switch still wins.
 Properties["Timeline Reporting"] = "No"
-timelinePayloads = {}
-ExecuteCommand("FRIGATE_DETECTION", { object_type = "person", count = 1, event_type = "new" })
-check("Timeline Reporting = No suppresses reporting",
+timelinePayloads, timerCallbacks = {}, {}
+review({ id = "rev-off", review_type = "genai", title = "Someone at the door" })
+check("Timeline Reporting = No suppresses review reporting",
       #timelinePayloads == 0, #timelinePayloads)
-check("history is still written with the Timeline off", #history > 0)
 OnPropertyChanged("Timeline Reporting")
 check("status reflects being switched off",
       props["Timeline Status"] == "Disabled", props["Timeline Status"])
 Properties["Timeline Reporting"] = nil
+OnPropertyChanged("Timeline Reporting")
 
 -- A rejecting agent is reported, not swallowed.
-OnPropertyChanged("Timeline Reporting")
-timelineReply, timelinePayloads = "<success>false</success>", {}
-ExecuteCommand("FRIGATE_DETECTION", { object_type = "person", count = 1, event_type = "new" })
+timelineReply, timelinePayloads, timerCallbacks = "<success>false</success>", {}, {}
+review({ id = "rev-reject", review_type = "genai", title = "Car in driveway" })
 check("a rejected event is surfaced in the status",
       (props["Timeline Status"] or ""):find("rejected") ~= nil,
       props["Timeline Status"])
 timelineReply = "<success>true</success>"
+
+-- The set of reported ids is bounded: a driver runs for months.
+Properties["Timeline Summary Wait (seconds)"] = "Off"
+timelinePayloads = {}
+for i = 1, 500 do
+    review({ id = "bulk-" .. i, review_type = "genai", title = "Event " .. i })
+end
+check("every distinct review was reported", #timelinePayloads == 500,
+      #timelinePayloads)
+local seenSize = 0
+for _ in pairs(reviewSeenForTest()) do seenSize = seenSize + 1 end
+check("the reported-id set stays bounded", seenSize <= 200, seenSize)
+-- Trimming must not forget an id recent enough to still see a duplicate.
+timelinePayloads = {}
+review({ id = "bulk-500", review_type = "genai", title = "Event 500" })
+check("a recent id is still deduplicated after trimming",
+      #timelinePayloads == 0, #timelinePayloads)
+Properties["Timeline Summary Wait (seconds)"] = "45"
+
+------------------------------------------------------------------------
+-- GenAI object descriptions
+------------------------------------------------------------------------
+history, timelinePayloads = {}, {}
+ExecuteCommand("FRIGATE_OBJECT_DESCRIPTION",
+    { id = "1755012345.1-abc", description = "A delivery driver leaves a parcel by the door." })
+check("an object description is recorded in history", #history == 1, #history)
+check("the description text is what is stored",
+      (history[1] or {}).etype == "Object Described", (history[1] or {}).etype)
+check("the description type is registered",
+      registeredTypes["Object Described"] == true)
+check("a description does not also create a Timeline entry",
+      #timelinePayloads == 0, #timelinePayloads)
+
+history = {}
+ExecuteCommand("FRIGATE_OBJECT_DESCRIPTION", { id = "x", description = "" })
+check("an empty description is ignored", #history == 0, #history)
+
+Properties["Record Object Detections"] = "No"
+history = {}
+ExecuteCommand("FRIGATE_OBJECT_DESCRIPTION", { id = "x", description = "Someone walked past." })
+check("descriptions follow the object-detection switch", #history == 0, #history)
+Properties["Record Object Detections"] = nil
 
 realWrite(failures == 0 and "\nALL PASS\n" or ("\n" .. failures .. " FAILURE(S)\n"))
 os.exit(failures == 0 and 0 or 1)

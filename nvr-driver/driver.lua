@@ -255,6 +255,20 @@ local function jsonBool(json, key)
     return json:match(pattern) ~= nil
 end
 
+--- Extract a JSON array of strings as a comma-separated list.
+local function jsonStringArray(json, key)
+    local body = json:match('"' .. key .. '"%s*:%s*%[([^%]]*)%]')
+    if not body then return "" end
+    local out = {}
+    for v in body:gmatch('"([^"]*)"') do out[#out + 1] = v end
+    return table.concat(out, ", ")
+end
+
+--- Extract a nested JSON object by key, or nil.
+local function jsonObject(json, key)
+    return json:match('"' .. key .. '"%s*:%s*(%b{})')
+end
+
 --- Extract the `after` object from a frigate/events payload.
 --- Event payloads carry both `before` and `after`; fields that change as the
 --- event matures (notably has_snapshot) must be read from `after`. The plain
@@ -281,6 +295,11 @@ local function subscribeFrigateTopics()
     local topics = {
         "frigate/available",
         "frigate/events",
+        -- Review segments: one per incident, with a GenAI summary attached in
+        -- a later message when review summaries are configured.
+        "frigate/reviews",
+        -- GenAI object descriptions, delivered well after the detection.
+        "frigate/tracked_object_update",
         -- Per-camera object counts
         "frigate/+/person",
         "frigate/+/car",
@@ -370,6 +389,67 @@ function handleEventJSON(payload)
     end
 end
 
+--- Handle a review segment from frigate/reviews.
+---
+--- Frigate publishes `new`, then `update`s, then `end` for each segment, and
+--- a further `genai` message carrying the summary when review summaries are
+--- configured. Only the terminal ones are forwarded: a review is one incident,
+--- and the camera driver decides how long to wait for the summary before
+--- settling for the object list.
+function handleReviewJSON(payload)
+    if not payload or payload == "" then return end
+
+    local msgType = jsonString(payload, "type") or ""
+    if msgType ~= "end" and msgType ~= "genai" then return end
+
+    local after = payload:match('"after"%s*:%s*(%b{})')
+    if not after then
+        log(LOG_DEBUG, "Review payload has no 'after' object — discarding")
+        return
+    end
+
+    local camera = jsonString(after, "camera")
+    if not camera then
+        log(LOG_DEBUG, "Review payload missing 'camera' — discarding")
+        return
+    end
+
+    local data     = jsonObject(after, "data") or "{}"
+    local metadata = jsonObject(data, "metadata")
+
+    sendToCamera(camera, "FRIGATE_REVIEW", {
+        id          = jsonString(after, "id") or "",
+        review_type = msgType,
+        severity    = jsonString(after, "severity") or "",
+        start_time  = jsonNumber(after, "start_time") or 0,
+        end_time    = jsonNumber(after, "end_time") or 0,
+        objects     = jsonStringArray(data, "objects"),
+        sub_labels  = jsonStringArray(data, "sub_labels"),
+        zones       = jsonStringArray(data, "zones"),
+        -- Present only once the GenAI summary has been generated.
+        title        = metadata and (jsonString(metadata, "title") or "") or "",
+        summary      = metadata and (jsonString(metadata, "shortSummary") or "") or "",
+        threat_level = metadata and (jsonNumber(metadata, "potential_threat_level") or 0) or 0,
+    })
+end
+
+--- Handle a GenAI object description from frigate/tracked_object_update.
+--- Arrives long after the detection it describes, so it is forwarded as its
+--- own event rather than being folded into the original detection.
+function handleObjectDescription(payload)
+    if not payload or payload == "" then return end
+    if (jsonString(payload, "type") or "") ~= "description" then return end
+
+    local camera      = jsonString(payload, "camera")
+    local description = jsonString(payload, "description")
+    if not camera or not description or description == "" then return end
+
+    sendToCamera(camera, "FRIGATE_OBJECT_DESCRIPTION", {
+        id          = jsonString(payload, "id") or "",
+        description = description,
+    })
+end
+
 --- Main MQTT message handler. Routes messages to camera drivers.
 local function onMQTTMessage(obj, msgId, topic, payload, qos, retain)
     log(LOG_TRACE, "MQTT msg: " .. topic .. " = " .. tostring(payload))
@@ -397,6 +477,18 @@ local function onMQTTMessage(obj, msgId, topic, payload, qos, retain)
     -- frigate/events
     if segments[2] == "events" then
         handleEventJSON(payload)
+        return
+    end
+
+    -- frigate/reviews — one message per incident, not per object transition
+    if segments[2] == "reviews" then
+        handleReviewJSON(payload)
+        return
+    end
+
+    -- frigate/tracked_object_update — GenAI object descriptions
+    if segments[2] == "tracked_object_update" then
+        handleObjectDescription(payload)
         return
     end
 

@@ -151,7 +151,32 @@
           <item>Yes</item>
           <item>No</item>
         </items>
-        <description>Report detections to the Control4 Timeline agent, which Navigator shows as its own scrubbing view. Has no effect on systems where the Timeline agent is not installed. Events are filtered by the same category switches below.</description>
+        <description>Report Frigate review items to the Control4 Timeline agent, which Navigator shows as its own scrubbing view. One entry per incident, titled from the GenAI review summary when one is configured. Has no effect on systems where the Timeline agent is not installed.</description>
+      </property>
+      <property>
+        <name>Timeline Review Severity</name>
+        <type>LIST</type>
+        <default>Alerts only</default>
+        <readonly>false</readonly>
+        <items>
+          <item>Alerts only</item>
+          <item>Alerts and detections</item>
+        </items>
+        <description>Which Frigate review severities reach the Timeline. Alerts only keeps it to what Frigate considers worth looking at.</description>
+      </property>
+      <property>
+        <name>Timeline Summary Wait (seconds)</name>
+        <type>LIST</type>
+        <default>45</default>
+        <readonly>false</readonly>
+        <items>
+          <item>Off</item>
+          <item>15</item>
+          <item>30</item>
+          <item>45</item>
+          <item>90</item>
+        </items>
+        <description>How long to wait after a review ends for its GenAI summary before falling back to the detected object list. The Timeline entry is stamped with the review's own start time, so waiting does not move it. Set to Off if GenAI review summaries are not configured.</description>
       </property>
       <property>
         <name>Timeline Status</name>
