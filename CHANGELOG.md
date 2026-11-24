@@ -14,7 +14,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **New MQTT subscriptions: `frigate/reviews` and `frigate/tracked_object_update` (NVR driver).** Neither was subscribed before, so review items and everything GenAI produced were invisible to Control4. Only the terminal `end` and `genai` review messages are forwarded; `new` and `update` are interim states of the same incident.
 
-- **GenAI object descriptions are recorded in the history.** `frigate/tracked_object_update` carries the generated text well after the detection it describes, so it is recorded as its own entry of type `Object Described` rather than amending one already written. It follows the `Record Object Detections` switch.
+- **Detection images attached to history entries.** `C4:RecordHistory` cannot carry an image, so entries that have one are recorded through the History agent instead: `RECORD_HISTORICAL_EVENT` returns a record uuid and `SET_METADATA_ON_RECORD` attaches `media_filename`. That value is a path on the controller's filesystem rather than a URL, so Frigate's snapshot is fetched to disk first, into a reused ring of 20 files per camera. Where the History agent is absent or declines, the entry still goes through `C4:RecordHistory`, so a missing agent costs the picture and not the entry. New camera property `Attach Detection Images` (`Yes` by default). Note the Timeline agent has no image field of its own — the picture is on the matching history entry.
+
+- **A history entry per review incident.** One entry per incident, carrying the GenAI summary as its text and the incident's snapshot as its picture, recorded as type `Review Alert` and gated by the new `Record Review Incidents` switch. A `potential_threat_level` of 2 is recorded as a Warning rather than Info.
+
+- **GenAI object descriptions are recorded in the history,** with the described object's own snapshot attached. `frigate/tracked_object_update` carries the generated text well after the detection it describes, so it is recorded as its own entry of type `Object Described` rather than amending one already written. It follows the `Record Object Detections` switch.
 
 - **Per-category history switches (camera driver).** Five new properties decide what reaches the history: `Record Object Detections`, `Record Motion Events`, `Record Zone Events`, `Record Audio Events` and `Record Camera Status`. They gate Timeline reporting too, so a category cannot flood one view while being suppressed in the other.
 

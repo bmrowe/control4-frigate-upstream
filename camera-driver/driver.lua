@@ -37,6 +37,7 @@ local PROP_NOTIFY_FRESHNESS = "Notification Image Freshness (seconds)"
 -- constantly, so recording every transition buries the object detections the
 -- history is there for; that one defaults off and the rest keep the previous
 -- behaviour.
+local PROP_HIST_REVIEWS = "Record Review Incidents"
 local PROP_HIST_OBJECTS = "Record Object Detections"
 local PROP_HIST_MOTION  = "Record Motion Events"
 local PROP_HIST_ZONES   = "Record Zone Events"
@@ -46,6 +47,7 @@ local PROP_HIST_STATUS  = "Record Camera Status"
 local PROP_TIMELINE          = "Timeline Reporting"
 local PROP_TIMELINE_SEVERITY = "Timeline Review Severity"
 local PROP_TIMELINE_WAIT     = "Timeline Summary Wait (seconds)"
+local PROP_HIST_IMAGES       = "Attach Detection Images"
 local PROP_TIMELINE_STATUS = "Timeline Status"
 
 -- The Timeline agent is a separate destination from the history: Navigator
@@ -295,6 +297,8 @@ local HISTORY_EVENTS = {
     { "Audio: Fire Alarm", "audio" }, { "Audio: Glass Breaking", "audio" },
     { "Audio: Siren", "audio" }, { "Audio: Car Horn", "audio" },
     { "Audio: Music", "audio" },
+    -- Review incidents
+    { "Review Alert", "reviews" },
     -- GenAI object descriptions
     { "Object Described", "objects" },
     -- State changes
@@ -306,6 +310,7 @@ local HISTORY_CATEGORY_OF = {}
 for _, e in ipairs(HISTORY_EVENTS) do HISTORY_CATEGORY_OF[e[1]] = e[2] end
 
 local HISTORY_CATEGORY_PROP = {
+    reviews = PROP_HIST_REVIEWS,
     objects = PROP_HIST_OBJECTS,
     motion  = PROP_HIST_MOTION,
     zones   = PROP_HIST_ZONES,
@@ -316,7 +321,8 @@ local HISTORY_CATEGORY_PROP = {
 -- Default for a property Composer has not written yet. Only motion differs
 -- from the previous always-record behaviour.
 local HISTORY_CATEGORY_DEFAULT = {
-    objects = true, motion = false, zones = true, audio = true, status = true,
+    reviews = true, objects = true, motion = false,
+    zones = true, audio = true, status = true,
 }
 
 --- Whether this event type should be written to the history.
@@ -474,6 +480,184 @@ local function refreshTimelineStatus()
 end
 
 ------------------------------------------------------------------------
+-- History agent (detection images)
+------------------------------------------------------------------------
+--
+-- C4:RecordHistory writes a text row and offers no way to attach a picture.
+-- The History agent does: RECORD_HISTORICAL_EVENT returns a record uuid, and
+-- SET_METADATA_ON_RECORD attaches `media_filename` to it. That value is a
+-- path on the controller's own filesystem, not a URL, so the image has to be
+-- fetched to disk first -- which is the whole reason this pipeline exists
+-- rather than simply handing Frigate's snapshot URL to Control4.
+
+--- Frigate's REST API base, or "" when the host is not configured yet.
+local function frigateBase()
+    local host = Properties[PROP_HOST] or ""
+    if host == "" then return "" end
+    return "http://" .. host .. ":" .. PORT_HTTP
+end
+
+--- The proxy device the history is recorded against. Navigator matches a
+--- stored record to a registration by this id, so both must use the same one.
+local function proxyDeviceIdForHistory()
+    local proxyDevices = C4:GetProxyDevices()
+    if type(proxyDevices) ~= "table" then return nil end
+    for id in pairs(proxyDevices) do return id end
+    return nil
+end
+
+local HISTORY_AGENT_NAMES = {
+    "history.c4i", "history.c4z",
+    "agent_history.c4i", "agent_history.c4z",
+    "control4_agent_history.c4i", "control4_agent_history.c4z",
+    "agent-history.c4z",
+}
+
+local historyAgentId    = nil
+local historyAgentAfter = 0
+
+local function resolveHistoryAgent(force)
+    if not force and not historyAgentId and os.time() < historyAgentAfter then
+        return nil
+    end
+    for _, fn in ipairs(HISTORY_AGENT_NAMES) do
+        local id
+        pcall(function() id = next(C4:GetDevicesByC4iName(fn)) end)
+        if id then
+            historyAgentId, historyAgentAfter = id, 0
+            log(LOG_INFO, "History agent: found '" .. fn .. "' at device " .. tostring(id))
+            return id
+        end
+    end
+    for _, nm in ipairs({ "History", "History Agent" }) do
+        local id
+        pcall(function()
+            for devId, devName in pairs(C4:GetDevicesByName(nm) or {}) do
+                if tostring(devName) == nm then id = devId end
+            end
+        end)
+        if id then
+            historyAgentId, historyAgentAfter = id, 0
+            log(LOG_INFO, "History agent: found by name '" .. nm .. "' at device " .. tostring(id))
+            return id
+        end
+    end
+    historyAgentAfter = os.time() + 60
+    log(LOG_DEBUG, "History agent: not found — entries will be text only")
+    return nil
+end
+
+-- Images are written to a small ring of files rather than accumulating: a
+-- busy camera would otherwise fill the controller's disk over months.
+local IMAGE_SLOTS   = 20
+local IMAGE_MAX     = 2 * 1024 * 1024
+local imageSlot     = 0
+local imageInFlight = 0
+local IMAGE_IN_FLIGHT_MAX = 4
+
+--- Fetch a JPEG to a local file and hand its path to `cb`, or nil.
+local function fetchImage(url, cb)
+    if imageInFlight >= IMAGE_IN_FLIGHT_MAX then
+        log(LOG_DEBUG, "Image fetch skipped — " .. imageInFlight .. " already in flight")
+        cb(nil)
+        return
+    end
+
+    imageSlot = (imageSlot % IMAGE_SLOTS) + 1
+    local name = ("detection_%02d.jpg"):format(imageSlot)
+    local dir
+    pcall(function() dir = C4:GetDriverFileDirectory() end)
+    local path = (dir and dir ~= "") and (dir .. "/" .. name) or name
+
+    imageInFlight = imageInFlight + 1
+    local done = false
+    local function finish(result)
+        if done then return end
+        done = true
+        imageInFlight = math.max(0, imageInFlight - 1)
+        cb(result)
+    end
+
+    local ok = pcall(function()
+        C4:urlGet(url, { ["Accept"] = "image/jpeg" }, false,
+            function(ticket, data, code, headers, err)
+                if code ~= 200 or not data or #data < 200 then
+                    log(LOG_DEBUG, "Image fetch failed: code=" .. tostring(code)
+                        .. " err=" .. tostring(err))
+                    finish(nil); return
+                end
+                if #data > IMAGE_MAX then
+                    log(LOG_DEBUG, "Image is " .. #data .. " bytes, over the cap — ignoring")
+                    finish(nil); return
+                end
+                -- A Frigate error page returns 200 with HTML; only a real JPEG
+                -- is worth attaching, and the magic bytes are the cheap check.
+                if data:byte(1) ~= 0xff or data:byte(2) ~= 0xd8 then
+                    log(LOG_DEBUG, "Response is not a JPEG — ignoring")
+                    finish(nil); return
+                end
+                local f = io.open(path, "wb")
+                if not f then
+                    log(LOG_WARNING, "Cannot write " .. path)
+                    finish(nil); return
+                end
+                f:write(data); f:close()
+                log(LOG_DEBUG, "Wrote " .. path .. " (" .. #data .. " bytes)")
+                finish(path)
+            end)
+    end)
+    if not ok then finish(nil) end
+end
+
+--- Record through the History agent so an image can be attached.
+--- Returns the record uuid, or nil when the agent is unavailable.
+local function recordViaAgent(severity, eventType, description)
+    if not historyAgentId then resolveHistoryAgent() end
+    if not historyAgentId then return nil end
+
+    local reply
+    local ok = pcall(function()
+        reply = C4:SendUIRequest(historyAgentId, "RECORD_HISTORICAL_EVENT", {
+            DEVICE_ID   = proxyDeviceIdForHistory(),
+            SEVERITY    = severity,
+            CATEGORY    = HISTORY_CATEGORY,
+            SUBCATEGORY = HISTORY_SUBCATEGORY,
+            TYPE        = eventType,
+            DESCRIPTION = description,
+        })
+    end)
+    if not ok or not reply then
+        log(LOG_DEBUG, "History agent: RECORD_HISTORICAL_EVENT failed")
+        return nil
+    end
+
+    local uuid
+    pcall(function()
+        local parsed = C4:ParseXml(reply)
+        if parsed and parsed.Name == "uuid" then uuid = parsed.Value end
+    end)
+    if not uuid then uuid = tostring(reply):match("<uuid>([^<]+)</uuid>") end
+    return uuid
+end
+
+--- Attach a already-downloaded image to a record the agent returned.
+local function attachImage(uuid, path)
+    if not uuid or not path or path == "" or not historyAgentId then return end
+    pcall(function()
+        C4:SendToDevice(historyAgentId, "SET_METADATA_ON_RECORD", {
+            RECORD_UUID    = uuid,
+            METADATA_NAME  = "media_filename",
+            METADATA_VALUE = path,
+        })
+    end)
+    log(LOG_DEBUG, "Attached " .. path .. " to record " .. uuid)
+end
+
+-- Forward declaration: a review incident is recorded in the history, but
+-- recordHistory needs the agent helpers above, so it is defined after this.
+local recordHistory
+
+------------------------------------------------------------------------
 -- Review segments
 ------------------------------------------------------------------------
 --
@@ -537,7 +721,18 @@ local function emitReview(id, p)
     if reviewSeen[id] then return end
     rememberReview(id)
     reviewPending[id] = nil
-    reportTimeline(reviewLabel(p), tonumber(p.start_time))
+
+    local label = reviewLabel(p)
+    reportTimeline(label, tonumber(p.start_time))
+
+    -- The incident is also worth a history entry, and unlike the Timeline the
+    -- history can carry the picture. The review names the tracked objects it
+    -- was built from, so the first one's snapshot is the image for the whole
+    -- incident.
+    local description = p.summary
+    if not description or description == "" then description = label end
+    recordHistory(description, (tonumber(p.threat_level) or 0) >= 2 and "Warning" or "Info",
+                  "Review Alert", (p.detections or ""):match("^[^,]+"))
 end
 
 --- Handle a review segment forwarded by the NVR.
@@ -602,7 +797,10 @@ end
 --- documented but was observed to stop records being stored on OS 3.4.3
 --- (v0.8.14-beta regression), so it is attempted only as an enhancement and
 --- immediately falls back to the plain form if it does not return a UUID.
-local function recordHistory(message, severity, eventType)
+--- `eventId` is a Frigate event id; when one is given and images are on, the
+--- entry is recorded through the History agent so its snapshot can be
+--- attached. Everything else goes the plain C4:RecordHistory route.
+function recordHistory(message, severity, eventType, eventId)
     severity = severity or "Info"
     if severity ~= "Info" and severity ~= "Warning" and severity ~= "Critical" then
         severity = "Info"
@@ -614,6 +812,23 @@ local function recordHistory(message, severity, eventType)
         return
     end
 
+    -- An entry with a picture is worth far more than one without, but only the
+    -- agent route can carry one. Fall through to the API when the agent is
+    -- missing or declines, so a missing agent costs the image, not the entry.
+    if eventId and eventId ~= "" and (Properties[PROP_HIST_IMAGES] or "Yes") == "Yes" then
+        local uuid = recordViaAgent(severity, eventType, tostring(message))
+        if uuid then
+            local base = frigateBase()
+            if base ~= "" then
+                fetchImage(base .. "/api/events/" .. eventId .. "/snapshot.jpg?bbox=1&h=480",
+                    function(path) attachImage(uuid, path) end)
+            end
+            log(LOG_DEBUG, "History recorded via agent: " .. eventType .. " (" .. uuid .. ")")
+            return
+        end
+        log(LOG_DEBUG, "History agent unavailable — recording " .. eventType
+            .. " through the API, without an image")
+    end
 
     local function record(...)
         local ok, uuid = pcall(C4.RecordHistory, C4, ...)
@@ -652,7 +867,7 @@ end
 local function handleObjectDescription(tParams)
     local description = tParams.description or ""
     if description == "" then return end
-    recordHistory(description, "Info", "Object Described")
+    recordHistory(description, "Info", "Object Described", tParams.id)
 end
 
 ------------------------------------------------------------------------
@@ -967,18 +1182,7 @@ end
 
 --- Register detection events with the History Agent for push notifications.
 local function registerNotificationEvents()
-    local proxyDevices = C4:GetProxyDevices()
-    if type(proxyDevices) ~= "table" then
-        log(LOG_WARNING, "RegisterEvents skipped — GetProxyDevices returned no table; "
-            .. "history will not surface in the Control4 app")
-        return
-    end
-
-    local proxyDeviceId = nil
-    for id, _ in pairs(proxyDevices) do
-        proxyDeviceId = id
-        break
-    end
+    local proxyDeviceId = proxyDeviceIdForHistory()
     if not proxyDeviceId then
         log(LOG_WARNING, "RegisterEvents skipped — no proxy device id found; "
             .. "history will not surface in the Control4 app")
@@ -1240,8 +1444,14 @@ function OnDriverLateInit()
 
     -- Agents are not always up when a driver loads, so look again shortly
     -- after rather than reporting "not installed" for the rest of the session.
+    -- This applies to the History agent as much as the Timeline one: without
+    -- it, every entry silently loses its picture for the rest of the session.
     refreshTimelineStatus()
-    C4:SetTimer(15000, function() resolveTimeline(true); refreshTimelineStatus() end)
+    C4:SetTimer(15000, function()
+        resolveTimeline(true)
+        refreshTimelineStatus()
+        resolveHistoryAgent(true)
+    end)
 end
 
 function OnDriverDestroyed()

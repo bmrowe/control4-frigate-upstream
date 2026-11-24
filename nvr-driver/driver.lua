@@ -426,6 +426,9 @@ function handleReviewJSON(payload)
         objects     = jsonStringArray(data, "objects"),
         sub_labels  = jsonStringArray(data, "sub_labels"),
         zones       = jsonStringArray(data, "zones"),
+        -- The tracked objects this incident was built from; the first one's
+        -- snapshot is the picture for the incident.
+        detections  = jsonStringArray(data, "detections"),
         -- Present only once the GenAI summary has been generated.
         title        = metadata and (jsonString(metadata, "title") or "") or "",
         summary      = metadata and (jsonString(metadata, "shortSummary") or "") or "",

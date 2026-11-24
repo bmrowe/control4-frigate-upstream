@@ -122,7 +122,8 @@
   <p>Five properties decide what reaches the history, by category:</p>
   <table>
     <tr><th>Property</th><th>Default</th><th>Covers</th></tr>
-    <tr><td><code>Record Object Detections</code></td><td>Yes</td><td>Person, car, dog, cat and generic object detected/left</td></tr>
+    <tr><td><code>Record Review Incidents</code></td><td>Yes</td><td>One entry per Frigate review item, with its snapshot attached</td></tr>
+    <tr><td><code>Record Object Detections</code></td><td>Yes</td><td>Person, car, dog, cat and generic object detected/left, and GenAI object descriptions</td></tr>
     <tr><td><code>Record Motion Events</code></td><td><b>No</b></td><td>Motion Detected, Motion Stopped</td></tr>
     <tr><td><code>Record Zone Events</code></td><td>Yes</td><td>Zone entered, zone exited, loitering</td></tr>
     <tr><td><code>Record Audio Events</code></td><td>Yes</td><td>Speech, bark, scream, yell, fire alarm, glass breaking, siren, car horn, music</td></tr>
@@ -164,6 +165,25 @@
   <p>This needs the NVR driver to be subscribed to <code>frigate/reviews</code>, which it is from
   v50 onwards. The history category switches above do not apply to the Timeline: a review item is not
   an object detection, and the two views are fed independently.</p>
+
+  <h3>Detection images</h3>
+  <p>With <code>Attach Detection Images</code> set to <code>Yes</code> (the default), a history entry
+  for an incident shows the picture rather than text alone.</p>
+
+  <p><code>C4:RecordHistory</code> has no way to carry an image, so these entries take a different
+  route: the <b>History agent</b>'s <code>RECORD_HISTORICAL_EVENT</code> returns a record uuid, and
+  <code>SET_METADATA_ON_RECORD</code> attaches <code>media_filename</code> to it. That value is a path
+  on the controller's own filesystem, not a URL, so the driver first fetches Frigate's snapshot
+  (<code>/api/events/&lt;id&gt;/snapshot.jpg?bbox=1&amp;h=480</code>) to disk. Images are written to a
+  ring of 20 files per camera and reused, so a busy camera cannot fill the controller's disk.</p>
+
+  <p>Where the History agent is not in the project, or declines the record, the entry still goes
+  through <code>C4:RecordHistory</code> as before — a missing agent costs the picture, not the entry.
+  The agent is looked for again 15 seconds after the driver loads, for the same reason as the
+  Timeline agent.</p>
+
+  <p>The Timeline agent itself has no image field, so Timeline entries are text. The picture lives on
+  the matching history entry.</p>
 
   <h3>GenAI object descriptions</h3>
   <p>Where Frigate is configured with GenAI object descriptions, the generated text arrives well after

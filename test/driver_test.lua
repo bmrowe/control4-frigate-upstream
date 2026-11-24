@@ -60,6 +60,10 @@ timelineReply     = "<success>true</success>"
 sentToDevice      = {}
 
 function C4:GetDevicesByC4iName(name)
+    if name == "history.c4i" or name == "history.c4z" then
+        if not historyAgentDeviceId then return {} end
+        return { [historyAgentDeviceId] = "History" }
+    end
     if name == "agent-timeline.c4z" then
         if not timelineAgentId then return {} end
         return { [timelineAgentId] = "Timeline" }
@@ -80,9 +84,44 @@ function C4:SendToDevice(id, cmd, params)
         timelinePayloads[#timelinePayloads + 1] = lastBase64Plain
         return timelineReply
     end
+    if cmd == "SET_METADATA_ON_RECORD" then
+        agentMetadata[#agentMetadata + 1] = params
+    end
 end
 function C4:urlEncode(s) return s end
-function C4:urlGet() return 0 end
+-- History agent. nil models a project without one, where entries must still
+-- be recorded, just without a picture.
+historyAgentDeviceId = nil
+agentRecords         = {}   -- RECORD_HISTORICAL_EVENT calls
+agentMetadata        = {}   -- SET_METADATA_ON_RECORD calls
+agentUuidSeq         = 0
+agentRejects         = false
+
+-- urlGet is answered synchronously here; the driver must not assume either.
+urlGetCalls   = {}
+urlGetStatus  = 200
+urlGetBody    = "\255\216" .. string.rep("j", 400)   -- JPEG magic + filler
+function C4:urlGet(url, headers, verifySsl, callback)
+    urlGetCalls[#urlGetCalls + 1] = url
+    if callback then callback(1, urlGetBody, urlGetStatus, {}, nil) end
+    return 1
+end
+function C4:SendUIRequest(deviceId, command, params)
+    if command ~= "RECORD_HISTORICAL_EVENT" then return nil end
+    if agentRejects then return nil end
+    agentRecords[#agentRecords + 1] = { deviceId = deviceId, params = params }
+    agentUuidSeq = agentUuidSeq + 1
+    return "<uuid>rec-" .. agentUuidSeq .. "</uuid>"
+end
+function C4:ParseXml(xml)
+    local v = tostring(xml):match("<uuid>([^<]+)</uuid>")
+    if v then return { Name = "uuid", Value = v } end
+    return nil
+end
+function C4:GetDevicesByName(name) return {} end
+function C4:GetDriverFileDirectory() return filesWrittenDir end
+filesWritten    = {}
+filesWrittenDir = "/tmp/c4-driver-test"
 function C4:GetDriverConfigInfo() return "" end
 function C4:AllowExecuteDeviceCommand() end
 -- Timer callbacks are recorded so a test can run them; the driver looks for
@@ -376,6 +415,7 @@ local function review(t)
         objects = t.objects or "person", sub_labels = t.sub_labels or "",
         title = t.title or "", summary = t.summary or "",
         threat_level = t.threat_level or 0,
+        detections = t.detections or "",
     }
     ExecuteCommand("FRIGATE_REVIEW", p)
 end
@@ -493,28 +533,150 @@ check("a recent id is still deduplicated after trimming",
 Properties["Timeline Summary Wait (seconds)"] = "45"
 
 ------------------------------------------------------------------------
+-- Detection images
+------------------------------------------------------------------------
+-- The whole point: a history entry that shows a picture. C4:RecordHistory
+-- cannot carry one, so an entry with an image must go through the agent.
+os.execute("mkdir -p " .. filesWrittenDir)
+Properties["Timeline Summary Wait (seconds)"] = "Off"
+
+-- No history agent: the entry must still be recorded, just without a picture.
+historyAgentDeviceId = nil
+history, agentRecords, agentMetadata, urlGetCalls = {}, {}, {}, {}
+review({ id = "img-noagent", review_type = "genai", title = "Person at door",
+         detections = "1755012345.1-abc" })
+check("without a history agent the entry is still recorded", #history == 1, #history)
+check("without a history agent nothing is fetched", #urlGetCalls == 0, #urlGetCalls)
+
+-- The agent comes up after the driver did; the retry must find it, or every
+-- entry silently loses its picture for the rest of the session.
+historyAgentDeviceId = 777
+timerCallbacks = {}
+OnDriverLateInit()
+runTimers()
+
+history, agentRecords, agentMetadata, urlGetCalls = {}, {}, {}, {}
+review({ id = "img-ok", review_type = "genai", title = "Person at door",
+         detections = "1755012345.1-abc,1755012346.2-def" })
+check("the entry goes through the history agent", #agentRecords == 1, #agentRecords)
+check("it does not also go through C4:RecordHistory", #history == 0, #history)
+check("the agent record names the event type",
+      (agentRecords[1] or {}).params.TYPE == "Review Alert",
+      (agentRecords[1] or {}).params.TYPE)
+check("the GenAI summary is the description",
+      (agentRecords[1] or {}).params.DESCRIPTION == "Person at door",
+      (agentRecords[1] or {}).params.DESCRIPTION)
+check("the snapshot of the first tracked object is fetched",
+      (urlGetCalls[1] or ""):find("/api/events/1755012345%.1%-abc/snapshot%.jpg") ~= nil,
+      urlGetCalls[1])
+check("the snapshot is requested with a bounding box",
+      (urlGetCalls[1] or ""):find("bbox=1") ~= nil, urlGetCalls[1])
+check("the image is attached to the record the agent returned",
+      #agentMetadata == 1 and agentMetadata[1].RECORD_UUID == "rec-1",
+      #agentMetadata)
+check("it is attached as media_filename",
+      (agentMetadata[1] or {}).METADATA_NAME == "media_filename",
+      (agentMetadata[1] or {}).METADATA_NAME)
+local attached = (agentMetadata[1] or {}).METADATA_VALUE or ""
+check("the attached value is a local path, not a URL",
+      attached:find(filesWrittenDir, 1, true) == 1
+      and attached:find("http", 1, true) == nil,
+      attached)
+
+-- A raised threat level is worth more than Info.
+history, agentRecords = {}, {}
+review({ id = "img-threat", review_type = "genai", title = "Someone trying doors",
+         detections = "1755012347.3-ghi", threat_level = 2 })
+check("a high threat level is recorded as a Warning",
+      (agentRecords[1] or {}).params.SEVERITY == "Warning",
+      (agentRecords[1] or {}).params.SEVERITY)
+
+-- Not a JPEG: a Frigate error page returns 200 with HTML.
+agentRecords, agentMetadata = {}, {}
+urlGetBody = "<html>not found</html>"
+review({ id = "img-nonjpeg", review_type = "genai", title = "x", detections = "e1" })
+check("a non-JPEG response is not attached", #agentMetadata == 0, #agentMetadata)
+check("the entry is still recorded without it", #agentRecords == 1, #agentRecords)
+urlGetBody = "\255\216" .. string.rep("j", 400)
+
+-- A failed fetch must not lose the entry either.
+agentRecords, agentMetadata = {}, {}
+urlGetStatus = 404
+review({ id = "img-404", review_type = "genai", title = "x", detections = "e2" })
+check("a failed fetch does not lose the entry", #agentRecords == 1, #agentRecords)
+check("a failed fetch attaches nothing", #agentMetadata == 0, #agentMetadata)
+urlGetStatus = 200
+
+-- An agent that declines falls back to the API rather than dropping the entry.
+agentRejects = true
+history, agentRecords, agentMetadata = {}, {}, {}
+review({ id = "img-reject", review_type = "genai", title = "x", detections = "e3" })
+check("an agent that declines falls back to the API", #history == 1, #history)
+check("the fallback attaches no image", #agentMetadata == 0, #agentMetadata)
+agentRejects = false
+
+-- Images can be switched off; entries then take the plain API route.
+Properties["Attach Detection Images"] = "No"
+history, agentRecords, urlGetCalls = {}, {}, {}
+review({ id = "img-off", review_type = "genai", title = "x", detections = "e4" })
+check("images off keeps the entry on the API route", #history == 1, #history)
+check("images off fetches nothing", #urlGetCalls == 0, #urlGetCalls)
+Properties["Attach Detection Images"] = nil
+
+-- A review with no tracked objects has no snapshot to fetch.
+history, agentRecords, urlGetCalls = {}, {}, {}
+review({ id = "img-nodet", review_type = "genai", title = "Audio only", detections = "" })
+check("a review with no tracked object fetches nothing", #urlGetCalls == 0, #urlGetCalls)
+check("it is still recorded", #history == 1, #history)
+
+-- Files are written to a bounded ring, not accumulated forever.
+historyAgentDeviceId, agentMetadata = 777, {}
+for i = 1, 60 do
+    review({ id = "ring-" .. i, review_type = "genai", title = "e", detections = "ev" .. i })
+end
+local distinct = {}
+for _, m in ipairs(agentMetadata) do distinct[m.METADATA_VALUE] = true end
+local n = 0
+for _ in pairs(distinct) do n = n + 1 end
+check("image files are reused from a bounded ring", n <= 20, n)
+check("every incident still got an image", #agentMetadata == 60, #agentMetadata)
+
+Properties["Timeline Summary Wait (seconds)"] = "45"
+
+------------------------------------------------------------------------
 -- GenAI object descriptions
 ------------------------------------------------------------------------
-history, timelinePayloads = {}, {}
+historyAgentDeviceId = 777
+history, agentRecords, agentMetadata, urlGetCalls, timelinePayloads = {}, {}, {}, {}, {}
 ExecuteCommand("FRIGATE_OBJECT_DESCRIPTION",
     { id = "1755012345.1-abc", description = "A delivery driver leaves a parcel by the door." })
-check("an object description is recorded in history", #history == 1, #history)
+check("an object description is recorded through the agent",
+      #agentRecords == 1, #agentRecords)
 check("the description text is what is stored",
-      (history[1] or {}).etype == "Object Described", (history[1] or {}).etype)
+      (agentRecords[1] or {}).params.DESCRIPTION
+        == "A delivery driver leaves a parcel by the door.",
+      (agentRecords[1] or {}).params.DESCRIPTION)
+check("the described object's own snapshot is fetched",
+      (urlGetCalls[1] or ""):find("1755012345.1-abc", 1, true) ~= nil, urlGetCalls[1])
+check("the picture is attached to the description", #agentMetadata == 1, #agentMetadata)
 check("the description type is registered",
       registeredTypes["Object Described"] == true)
 check("a description does not also create a Timeline entry",
       #timelinePayloads == 0, #timelinePayloads)
 
-history = {}
+history, agentRecords = {}, {}
 ExecuteCommand("FRIGATE_OBJECT_DESCRIPTION", { id = "x", description = "" })
-check("an empty description is ignored", #history == 0, #history)
+check("an empty description is ignored",
+      #history == 0 and #agentRecords == 0, #history + #agentRecords)
 
 Properties["Record Object Detections"] = "No"
-history = {}
+history, agentRecords = {}, {}
 ExecuteCommand("FRIGATE_OBJECT_DESCRIPTION", { id = "x", description = "Someone walked past." })
-check("descriptions follow the object-detection switch", #history == 0, #history)
+check("descriptions follow the object-detection switch",
+      #history == 0 and #agentRecords == 0, #history + #agentRecords)
 Properties["Record Object Detections"] = nil
+
+os.execute("rm -rf " .. filesWrittenDir)
 
 realWrite(failures == 0 and "\nALL PASS\n" or ("\n" .. failures .. " FAILURE(S)\n"))
 os.exit(failures == 0 and 0 or 1)
