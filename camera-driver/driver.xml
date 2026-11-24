@@ -143,6 +143,61 @@
         </items>
       </property>
       <property>
+        <name>Record Object Detections</name>
+        <type>LIST</type>
+        <default>Yes</default>
+        <readonly>false</readonly>
+        <items>
+          <item>Yes</item>
+          <item>No</item>
+        </items>
+        <description>Write person, car, dog, cat and generic object detections to History.</description>
+      </property>
+      <property>
+        <name>Record Motion Events</name>
+        <type>LIST</type>
+        <default>No</default>
+        <readonly>false</readonly>
+        <items>
+          <item>Yes</item>
+          <item>No</item>
+        </items>
+        <description>Write Motion Detected and Motion Stopped to History. Frigate toggles this topic constantly, so leaving it on buries the object detections under motion rows. Off by default.</description>
+      </property>
+      <property>
+        <name>Record Zone Events</name>
+        <type>LIST</type>
+        <default>Yes</default>
+        <readonly>false</readonly>
+        <items>
+          <item>Yes</item>
+          <item>No</item>
+        </items>
+        <description>Write zone entry, exit and loitering events to History.</description>
+      </property>
+      <property>
+        <name>Record Audio Events</name>
+        <type>LIST</type>
+        <default>Yes</default>
+        <readonly>false</readonly>
+        <items>
+          <item>Yes</item>
+          <item>No</item>
+        </items>
+        <description>Write audio detections (speech, bark, scream, siren and the rest) to History.</description>
+      </property>
+      <property>
+        <name>Record Camera Status</name>
+        <type>LIST</type>
+        <default>Yes</default>
+        <readonly>false</readonly>
+        <items>
+          <item>Yes</item>
+          <item>No</item>
+        </items>
+        <description>Write camera online/offline and detection/recording state changes to History.</description>
+      </property>
+      <property>
         <name>Notification Image Freshness (seconds)</name>
         <type>LIST</type>
         <default>60</default>

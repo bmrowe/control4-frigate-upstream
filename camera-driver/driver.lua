@@ -33,6 +33,16 @@ local PROP_LAST_MOTION = "Last Motion"
 local PROP_LOG_LEVEL   = "Log Level"
 local PROP_NOTIFY_FRESHNESS = "Notification Image Freshness (seconds)"
 
+-- History category switches. Frigate toggles frigate/<camera>/motion
+-- constantly, so recording every transition buries the object detections the
+-- history is there for; that one defaults off and the rest keep the previous
+-- behaviour.
+local PROP_HIST_OBJECTS = "Record Object Detections"
+local PROP_HIST_MOTION  = "Record Motion Events"
+local PROP_HIST_ZONES   = "Record Zone Events"
+local PROP_HIST_AUDIO   = "Record Audio Events"
+local PROP_HIST_STATUS  = "Record Camera Status"
+
 -- Log levels
 local LOG_FATAL   = 0
 local LOG_ERROR   = 1
@@ -248,6 +258,64 @@ end
 local HISTORY_CATEGORY    = "Cameras"
 local HISTORY_SUBCATEGORY = "Frigate"
 
+-- Every event type that can reach the history, with the category that gates
+-- it. RegisterEvents is generated from this list, so a type cannot be
+-- recorded without also being registered -- previously the two were parallel
+-- lists kept in step by hand.
+local HISTORY_EVENTS = {
+    -- Object detection
+    { "Person Detected", "objects" }, { "Person Left", "objects" },
+    { "Car Detected",    "objects" }, { "Car Left",    "objects" },
+    { "Dog Detected",    "objects" }, { "Dog Left",    "objects" },
+    { "Cat Detected",    "objects" }, { "Cat Left",    "objects" },
+    { "Object Detected", "objects" }, { "Object Left", "objects" },
+    -- Motion
+    { "Motion Detected", "motion" },  { "Motion Stopped", "motion" },
+    -- Zones
+    { "Zone Entered", "zones" }, { "Zone Exited", "zones" },
+    { "Loitering Detected", "zones" },
+    -- Health
+    { "Camera Online", "status" }, { "Camera Offline", "status" },
+    -- Audio detection
+    { "Audio: Speech", "audio" }, { "Audio: Bark", "audio" },
+    { "Audio: Scream", "audio" },  { "Audio: Yell", "audio" },
+    { "Audio: Fire Alarm", "audio" }, { "Audio: Glass Breaking", "audio" },
+    { "Audio: Siren", "audio" }, { "Audio: Car Horn", "audio" },
+    { "Audio: Music", "audio" },
+    -- State changes
+    { "Detection Enabled", "status" }, { "Detection Disabled", "status" },
+    { "Recording Enabled", "status" }, { "Recording Disabled", "status" },
+}
+
+local HISTORY_CATEGORY_OF = {}
+for _, e in ipairs(HISTORY_EVENTS) do HISTORY_CATEGORY_OF[e[1]] = e[2] end
+
+local HISTORY_CATEGORY_PROP = {
+    objects = PROP_HIST_OBJECTS,
+    motion  = PROP_HIST_MOTION,
+    zones   = PROP_HIST_ZONES,
+    audio   = PROP_HIST_AUDIO,
+    status  = PROP_HIST_STATUS,
+}
+
+-- Default for a property Composer has not written yet. Only motion differs
+-- from the previous always-record behaviour.
+local HISTORY_CATEGORY_DEFAULT = {
+    objects = true, motion = false, zones = true, audio = true, status = true,
+}
+
+--- Whether this event type should be written to the history.
+--- An unknown type records, so adding one cannot silently lose it.
+local function historyEnabled(eventType)
+    local category = HISTORY_CATEGORY_OF[eventType]
+    if not category then return true end
+    local value = Properties[HISTORY_CATEGORY_PROP[category]]
+    if value == nil or value == "" then
+        return HISTORY_CATEGORY_DEFAULT[category]
+    end
+    return value == "Yes"
+end
+
 --- Record an event in the history database.
 ---
 --- Signature per the DriverWorks API reference (Helper Interface, 1.6.0+):
@@ -273,6 +341,11 @@ local function recordHistory(message, severity, eventType)
         severity = "Info"
     end
     eventType = eventType or "Camera Event"
+
+    if not historyEnabled(eventType) then
+        log(LOG_DEBUG, "History suppressed by settings: " .. eventType)
+        return
+    end
 
     local function record(...)
         local ok, uuid = pcall(C4.RecordHistory, C4, ...)
@@ -635,33 +708,14 @@ local function registerNotificationEvents()
         return
     end
 
-    -- Every event type passed to recordHistory() must be registered here, or
-    -- Navigator has no registration to match the stored record against.
-    local types = {
-        -- Object detection
-        "Person Detected", "Person Left",
-        "Car Detected",    "Car Left",
-        "Dog Detected",    "Dog Left",
-        "Cat Detected",    "Cat Left",
-        "Object Detected", "Object Left",
-        -- Motion / zones / loitering
-        "Motion Detected", "Motion Stopped",
-        "Zone Entered",    "Zone Exited",
-        "Loitering Detected",
-        -- Health
-        "Camera Online",   "Camera Offline",
-        -- Audio detection
-        "Audio: Speech", "Audio: Bark", "Audio: Scream", "Audio: Yell",
-        "Audio: Fire Alarm", "Audio: Glass Breaking", "Audio: Siren",
-        "Audio: Car Horn", "Audio: Music",
-        -- State changes
-        "Detection Enabled", "Detection Disabled",
-        "Recording Enabled", "Recording Disabled",
-    }
-
+    -- Registered from HISTORY_EVENTS, so a type that can be recorded is always
+    -- one Navigator can match a stored record against. Every type is
+    -- registered whatever the category switches say: the switches decide what
+    -- gets written, not what Navigator is able to display, so turning one back
+    -- on needs no re-registration.
     local typeList = ""
-    for _, t in ipairs(types) do
-        typeList = typeList .. '<type name="' .. C4:XmlEscapeString(t) .. '"/>'
+    for _, e in ipairs(HISTORY_EVENTS) do
+        typeList = typeList .. '<type name="' .. C4:XmlEscapeString(e[1]) .. '"/>'
     end
 
     local xml = '<events>'

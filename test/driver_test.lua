@@ -233,5 +233,66 @@ Properties["Frigate Host"] = ""
 check("unset host returns empty string", GetNotificationAttachmentURL(1001, {}) == "")
 Properties["Frigate Host"] = savedHost
 
+------------------------------------------------------------------------
+-- History category switches
+------------------------------------------------------------------------
+local function historyTypes()
+    local t = {}
+    for _, h in ipairs(history) do t[h.etype] = true end
+    return t
+end
+
+-- Motion is the reason these switches exist: frigate/<camera>/motion toggles
+-- constantly, so every transition used to land in the history.
+history = {}
+ExecuteCommand("FRIGATE_MOTION", { active = true })
+ExecuteCommand("FRIGATE_MOTION", { active = false })
+check("motion is not recorded by default", #history == 0, #history)
+
+local firedMotion = {}
+for _, e in ipairs(events) do firedMotion[e] = true end
+check("suppressing motion history still fires the Composer event",
+      firedMotion["Motion Detected"] == true)
+
+Properties["Record Motion Events"] = "Yes"
+history = {}
+ExecuteCommand("FRIGATE_MOTION", { active = true })
+check("motion is recorded once switched on",
+      historyTypes()["Motion Detected"] == true, #history)
+Properties["Record Motion Events"] = nil
+
+-- The other categories keep the previous always-record behaviour.
+history = {}
+ExecuteCommand("FRIGATE_DETECTION", { object_type = "person", count = 1, event_type = "new" })
+check("object detections record by default",
+      historyTypes()["Person Detected"] == true, #history)
+
+Properties["Record Object Detections"] = "No"
+history = {}
+ExecuteCommand("FRIGATE_DETECTION", { object_type = "person", count = 1, event_type = "new" })
+check("object detections can be switched off", #history == 0, #history)
+Properties["Record Object Detections"] = nil
+
+Properties["Record Zone Events"] = "No"
+history = {}
+ExecuteCommand("FRIGATE_ZONE", { zone = "driveway", object_type = "person", count = 1 })
+check("zone events can be switched off", #history == 0, #history)
+Properties["Record Zone Events"] = nil
+
+history = {}
+ExecuteCommand("FRIGATE_ZONE", { zone = "driveway", object_type = "person", count = 1 })
+check("zone events record by default",
+      historyTypes()["Zone Entered"] == true, #history)
+
+-- A switch gates what is written, never what Navigator can display: the
+-- registration must cover every type so turning one back on needs no reload.
+check("motion types stay registered while suppressed",
+      registeredTypes["Motion Detected"] and registeredTypes["Motion Stopped"])
+check("every object type stays registered",
+      registeredTypes["Person Detected"] and registeredTypes["Object Left"])
+check("audio and status types stay registered",
+      registeredTypes["Audio: Speech"] and registeredTypes["Camera Offline"]
+      and registeredTypes["Recording Disabled"])
+
 realWrite(failures == 0 and "\nALL PASS\n" or ("\n" .. failures .. " FAILURE(S)\n"))
 os.exit(failures == 0 and 0 or 1)
