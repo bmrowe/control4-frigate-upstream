@@ -723,6 +723,61 @@ check("descriptions have their own switch",
       #history == 0 and #agentRecords == 0, #history + #agentRecords)
 Properties["Record Object Descriptions"] = nil
 
+------------------------------------------------------------------------
+-- Every entry point survives being called
+------------------------------------------------------------------------
+-- A driver.lua is loaded top to bottom, so a helper used above its own
+-- definition is nil at call time rather than a load error. Calling every
+-- command is what catches that, and it has caught it twice.
+os.execute("mkdir -p " .. filesWrittenDir)
+local entryPoints = {
+    { "FRIGATE_DETECTION", { object_type = "person", count = 1, event_type = "new" } },
+    { "FRIGATE_DETECTION", { object_type = "squirrel", count = 0, event_type = "end" } },
+    { "FRIGATE_EVENT",     { event_id = "e1", has_snapshot = true } },
+    { "FRIGATE_MOTION",    { active = true } },
+    { "FRIGATE_MOTION",    { active = false } },
+    { "FRIGATE_ZONE",      { zone = "driveway", object_type = "person", count = 1 } },
+    { "FRIGATE_LOITERING", { zone = "driveway", object_type = "person" } },
+    { "FRIGATE_HEALTH",    { online = true } },
+    { "FRIGATE_HEALTH",    { online = false } },
+    { "FRIGATE_AUDIO",     { audio_type = "speech" } },
+    { "FRIGATE_REVIEW",    { id = "sm1", review_type = "end", severity = "alert",
+                             start_time = 1, objects = "person", detections = "e1" } },
+    { "FRIGATE_REVIEW",    { id = "sm1", review_type = "genai", severity = "alert",
+                             start_time = 1, title = "t", detections = "e1" } },
+    { "FRIGATE_OBJECT_DESCRIPTION", { id = "e1", description = "A person walked by." } },
+    { "FRIGATE_STATE",     { setting = "detect", enabled = true } },
+    { "IDENTIFY_CAMERA",   { camera = "bbq" } },
+    { "SET_FRIGATE_CONFIG",{ host = "192.168.1.50", camera = "bbq" } },
+    -- Nothing should reach a handler with no parameters at all, but the
+    -- driver must not fall over if the NVR sends a bare command.
+    { "FRIGATE_REVIEW",    {} },
+    { "FRIGATE_OBJECT_DESCRIPTION", {} },
+    { "FRIGATE_DETECTION", {} },
+    { "FRIGATE_MOTION",    {} },
+    { "FRIGATE_ZONE",      {} },
+    { "FRIGATE_AUDIO",     {} },
+    { "FRIGATE_HEALTH",    {} },
+    { "FRIGATE_STATE",     {} },
+}
+local broke = {}
+for _, e in ipairs(entryPoints) do
+    local okCall, errCall = pcall(ExecuteCommand, e[1], e[2])
+    if not okCall then broke[#broke + 1] = e[1] .. ": " .. tostring(errCall) end
+end
+check("every ExecuteCommand entry point survives", #broke == 0,
+      table.concat(broke, " | "))
+
+local okLifecycle, errLifecycle = pcall(function()
+    OnDriverLateInit()
+    runTimers()
+    OnPropertyChanged("Frigate Host")
+    OnPropertyChanged("Camera Name")
+    OnPropertyChanged("Timeline Reporting")
+    OnDriverDestroyed()
+end)
+check("the lifecycle entry points survive", okLifecycle, errLifecycle)
+
 os.execute("rm -rf " .. filesWrittenDir)
 
 realWrite(failures == 0 and "\nALL PASS\n" or ("\n" .. failures .. " FAILURE(S)\n"))
