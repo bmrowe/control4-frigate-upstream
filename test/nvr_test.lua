@@ -344,6 +344,28 @@ onMQTTMessageForTest("frigate/valid_area/person/active", "1")
 check("a zone's /active topic is swallowed, not mistaken for a camera",
       #sent == 0, #sent)
 
+-- MQTT connects before the config fetch returns and Frigate's zone counts are
+-- retained, so a zone is usually recorded as an unmatched camera first.
+-- Nothing else would ever clear it: unmatched entries are only cleared when a
+-- name resolves to a camera device, which a zone never does.
+zoneToCamera = {}
+sent = {}
+onMQTTMessageForTest("frigate/valid_area/person", "1")
+check("before the config arrives, a zone is recorded as unmatched",
+      unmatchedForTest()["valid_area"] == true)
+buildZoneMap(CONFIG, { "bbq", "driveway", "nozones" })
+check("learning the zones clears them from the unmatched list",
+      unmatchedForTest()["valid_area"] == nil
+      and unmatchedForTest()["valid_area_bottom"] == nil)
+check("a genuinely unknown name is left in the unmatched list",
+      (function()
+          zoneToCamera = {}
+          sent = {}
+          onMQTTMessageForTest("frigate/not_a_camera/person", "1")
+          buildZoneMap(CONFIG, { "bbq", "driveway", "nozones" })
+          return unmatchedForTest()["not_a_camera"] == true
+      end)())
+
 -- An unknown name is still an unmatched camera, which is the real warning.
 sent = {}
 onMQTTMessageForTest("frigate/not_a_thing/person", "1")

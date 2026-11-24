@@ -64,7 +64,7 @@ local PERSIST_LAST_INSTALL = "last_install_attempt"
 
 -- Current release tag for this driver build. Bumped per release alongside <version>.
 -- Used as the comparison baseline for the update checker.
-local DRIVER_RELEASE  = "v0.9.0-rc.1"
+local DRIVER_RELEASE  = "v0.9.0-rc.1+review-timeline"
 
 -- GitHub repo for auto-update checks
 local UPDATE_REPO     = "mattstein111/control4-frigate"
@@ -520,6 +520,22 @@ function buildZoneMap(configJson, cameraNames)
     end
 
     zoneToCamera = map
+
+    -- MQTT connects before this fetch returns, and Frigate's zone counts are
+    -- retained, so zones usually arrive first and are recorded as unmatched
+    -- cameras. Nothing would ever clear them: unmatched entries are only
+    -- cleared when a name resolves to a camera device, which a zone never
+    -- does. Drop them here, now that they are known to be zones.
+    local cleared = false
+    for zone in pairs(map) do
+        if unmatchedCameras[zone] then
+            unmatchedCameras[zone] = nil
+            cleared = true
+            log(LOG_INFO, "'" .. zone .. "' is a zone, not an unmatched camera")
+        end
+    end
+    if cleared then updateUnmatchedDisplay() end
+
     log(LOG_INFO, "Mapped " .. count .. " zone(s) to their cameras")
 end
 
@@ -672,6 +688,10 @@ local function onMQTTMessage(obj, msgId, topic, payload, qos, retain)
         return
     end
 end
+
+-- Test seam: a zone wrongly listed as a camera is the visible symptom, so
+-- the suite asserts on the list itself.
+function unmatchedForTest() return unmatchedCameras end
 
 -- Test seam: the zone/camera ambiguity lives in the routing itself, so the
 -- suite drives whole topics through it rather than the handlers beneath.
