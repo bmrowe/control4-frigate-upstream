@@ -912,7 +912,8 @@ function recordHistory(message, severity, eventType, eventId, category)
         if uuid then
             local base = frigateBase()
             if base ~= "" then
-                fetchImage(base .. "/api/events/" .. eventId .. "/snapshot.jpg?bbox=1&h=480",
+                fetchImage(base .. "/api/events/" .. eventId
+                           .. "/snapshot.jpg?bbox=1&height=480",
                     function(path) attachImage(uuid, path) end)
             end
             log(LOG_DEBUG, "History recorded via agent: " .. eventType .. " (" .. uuid .. ")")
@@ -1270,7 +1271,10 @@ function GetNotificationAttachmentURL(idBinding, tParams)
 
     if window > 0 and lastEvent.id and lastEvent.hasSnapshot
        and (os.time() - lastEvent.timestamp) <= window then
-        local url = base .. "/api/events/" .. lastEvent.id .. "/snapshot.jpg?bbox=1&h=480"
+        -- height, not h: Frigate has no `h` parameter and silently returns
+        -- the full-size frame, so this was attaching a full-resolution JPEG.
+        local url = base .. "/api/events/" .. lastEvent.id
+                    .. "/snapshot.jpg?bbox=1&height=480"
         log(LOG_DEBUG, "Notification image: event snapshot " .. url)
         return url
     end
@@ -1341,10 +1345,10 @@ function UIRequest(sCommand, tParams)
         return getStreamURLs(tParams)
     end
     if sCommand == "GET_SNAPSHOT_QUERY_STRING" then
-        return getSnapshotQueryString()
+        return getSnapshotQueryString(tParams)
     end
     if sCommand == "GET_MJPEG_QUERY_STRING" then
-        return getMJPEGQueryString()
+        return getMJPEGQueryString(tParams)
     end
     if sCommand == "GET_RTSP_H264_QUERY_STRING" then
         return getRTSPH264QueryString()
@@ -1381,11 +1385,32 @@ end
 -- Legacy Query String Handlers (fallback for older navigators)
 ------------------------------------------------------------------------
 
-function getMJPEGQueryString()
+--- Frigate resizes on `height`. `h` is not one of its parameters and is
+--- silently ignored, returning the full-size frame -- which is why asking for
+--- a thumbnail used to deliver a 2K JPEG. bbox and timestamp suppress the
+--- debug overlays Frigate would otherwise draw on it.
+local function frigateImageParams(sizeY, extra)
+    local h = tonumber(sizeY)
+    if not h or h <= 0 then return extra or "" end
+    h = math.floor(h)
+    if h < 120 then h = 120 elseif h > 1080 then h = 1080 end
+    return "?height=" .. h .. "&bbox=0&timestamp=0" .. (extra or "")
+end
+
+function getMJPEGQueryString(tParams)
     local cam = cameraName()
     if not cam then return "" end
-    -- Frigate serves MJPEG at /api/<camera_name> (multipart/x-mixed-replace)
+    tParams = tParams or {}
+    -- Frigate serves MJPEG at /api/<camera_name> (multipart/x-mixed-replace).
+    -- DELAY is the gap between frames in ms; Frigate wants frames per second.
+    local fps
+    local delay = tonumber(tParams.DELAY)
+    if delay and delay > 0 then
+        fps = math.floor(1000 / delay)
+        if fps < 1 then fps = 1 elseif fps > 10 then fps = 10 end
+    end
     local path = "api/" .. cam
+        .. frigateImageParams(tParams.SIZE_Y, fps and ("&fps=" .. fps) or nil)
     return "<mjpeg_query_string>" .. C4:XmlEscapeString(path) .. "</mjpeg_query_string>"
 end
 
@@ -1395,10 +1420,18 @@ function getRTSPH264QueryString()
     return "<rtsp_h264_query_string>" .. C4:XmlEscapeString(src) .. "</rtsp_h264_query_string>"
 end
 
-function getSnapshotQueryString()
+--- Navigator asks for the size it is about to draw. The camera list asks for
+--- a thumbnail of every camera at once, so honouring that is the difference
+--- between a page that loads and one that spins.
+function getSnapshotQueryString(tParams)
     local cam = cameraName()
     if not cam then return "" end
+    tParams = tParams or {}
     local path = "api/" .. cam .. "/latest.jpg"
+        .. frigateImageParams(tParams.SIZE_Y, "&quality=70")
+    log(LOG_DEBUG, "Snapshot requested at "
+        .. tostring(tParams.SIZE_X) .. "x" .. tostring(tParams.SIZE_Y)
+        .. " -> " .. path)
     return "<snapshot_query_string>" .. C4:XmlEscapeString(path) .. "</snapshot_query_string>"
 end
 

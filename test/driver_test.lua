@@ -272,7 +272,8 @@ check("missing event_id leaves the cache intact", le.id == "1755000000.0-nosnap"
 ------------------------------------------------------------------------
 -- Notification attachment URL selection (#25)
 ------------------------------------------------------------------------
-local EVENT_URL = "http://192.168.1.50:5000/api/events/1755012345.678901-abc123/snapshot.jpg?bbox=1&h=480"
+-- height, not h: Frigate has no `h` parameter and ignores it silently.
+local EVENT_URL = "http://192.168.1.50:5000/api/events/1755012345.678901-abc123/snapshot.jpg?bbox=1&height=480"
 local LIVE_URL  = "http://192.168.1.50:5000/api/bbq/latest.jpg"
 
 local function setEvent(id, hasSnapshot, ageSeconds)
@@ -799,6 +800,52 @@ ExecuteCommand("FRIGATE_OBJECT_DESCRIPTION", { id = "z", description = "Someone 
 check("descriptions have their own switch",
       #history == 0 and #agentRecords == 0, #history + #agentRecords)
 Properties["Record Object Descriptions"] = nil
+
+------------------------------------------------------------------------
+-- Image size is what Navigator asked for
+------------------------------------------------------------------------
+-- The camera list draws every camera at once. Serving a full-resolution
+-- frame to each thumbnail is the difference between a page that loads and
+-- one that spins, and Frigate resizes on `height` -- `h` is not one of its
+-- parameters and is ignored without complaint.
+local function snapQS(t) return getSnapshotQueryString(t) end
+
+check("a thumbnail request asks Frigate for that height",
+      snapQS({ SIZE_X = 320, SIZE_Y = 180 }):find("height=180", 1, true) ~= nil,
+      snapQS({ SIZE_X = 320, SIZE_Y = 180 }))
+check("it never uses the h parameter Frigate ignores",
+      snapQS({ SIZE_X = 320, SIZE_Y = 180 }):find("&h=", 1, true) == nil
+      and snapQS({ SIZE_X = 320, SIZE_Y = 180 }):find("?h=", 1, true) == nil,
+      snapQS({ SIZE_X = 320, SIZE_Y = 180 }))
+check("Frigate's debug overlays are suppressed",
+      snapQS({ SIZE_Y = 180 }):find("bbox=0", 1, true)
+      and snapQS({ SIZE_Y = 180 }):find("timestamp=0", 1, true))
+check("an absurdly small request is clamped up",
+      snapQS({ SIZE_Y = 10 }):find("height=120", 1, true) ~= nil,
+      snapQS({ SIZE_Y = 10 }))
+check("a request larger than the source is clamped down",
+      snapQS({ SIZE_Y = 4000 }):find("height=1080", 1, true) ~= nil,
+      snapQS({ SIZE_Y = 4000 }))
+check("no size asked for means no resize imposed",
+      snapQS({}):find("height=", 1, true) == nil, snapQS({}))
+check("the camera name is still in the path",
+      snapQS({ SIZE_Y = 180 }):find("api/bbq/latest.jpg", 1, true) ~= nil,
+      snapQS({ SIZE_Y = 180 }))
+
+-- MJPEG takes frames per second; Navigator gives the gap between frames.
+check("MJPEG converts the frame delay to fps",
+      getMJPEGQueryString({ SIZE_Y = 360, DELAY = 200 }):find("fps=5", 1, true) ~= nil,
+      getMJPEGQueryString({ SIZE_Y = 360, DELAY = 200 }))
+check("MJPEG asks for the height Navigator wants",
+      getMJPEGQueryString({ SIZE_Y = 360, DELAY = 200 }):find("height=360", 1, true) ~= nil,
+      getMJPEGQueryString({ SIZE_Y = 360, DELAY = 200 }))
+check("an unreasonable frame rate is clamped",
+      getMJPEGQueryString({ SIZE_Y = 360, DELAY = 10 }):find("fps=10", 1, true) ~= nil,
+      getMJPEGQueryString({ SIZE_Y = 360, DELAY = 10 }))
+check("UIRequest passes the requested size through",
+      UIRequest("GET_SNAPSHOT_QUERY_STRING", { SIZE_X = 320, SIZE_Y = 180 })
+        :find("height=180", 1, true) ~= nil,
+      UIRequest("GET_SNAPSHOT_QUERY_STRING", { SIZE_X = 320, SIZE_Y = 180 }))
 
 ------------------------------------------------------------------------
 -- Every entry point survives being called
