@@ -273,37 +273,63 @@ end
 --- under a different category is why history was invisible in the Control4 app
 --- despite appearing in the History agent (issue #24).
 local HISTORY_CATEGORY    = "Cameras"
-local HISTORY_SUBCATEGORY = "Frigate"
+-- Control4's own camera-history subcategory, not a name of our own. Navigator
+-- renders this one with the attached image; a custom subcategory stores the
+-- record and lists it, but without the picture, which is the point of
+-- recording through the agent at all.
+local HISTORY_SUBCATEGORY = "IP Camera"
 
 -- Every event type that can reach the history, with the category that gates
 -- it. RegisterEvents is generated from this list, so a type cannot be
 -- recorded without also being registered -- previously the two were parallel
 -- lists kept in step by hand.
+-- Control4's standard camera event vocabulary. Navigator knows these names
+-- and renders them with the picture; names of our own invention list as plain
+-- rows. Frigate's labels are mapped onto this set rather than passed through.
 local HISTORY_EVENTS = {
     -- Object detection
-    { "Person Detected", "objects" }, { "Person Left", "objects" },
-    { "Car Detected",    "objects" }, { "Car Left",    "objects" },
-    { "Dog Detected",    "objects" }, { "Dog Left",    "objects" },
-    { "Cat Detected",    "objects" }, { "Cat Left",    "objects" },
-    { "Object Detected", "objects" }, { "Object Left", "objects" },
-    -- Motion
-    { "Motion Detected", "motion" },  { "Motion Stopped", "motion" },
-    -- Zones
-    { "Zone Entered", "zones" }, { "Zone Exited", "zones" },
-    { "Loitering Detected", "zones" },
-    -- Health
-    { "Camera Online", "status" }, { "Camera Offline", "status" },
+    { "Person",        "objects" },
+    { "Vehicle",       "objects" },
+    { "Animal",        "objects" },
+    { "Package",       "objects" },
+    { "Face",          "objects" },
+    { "License Plate", "objects" },
+    -- Motion and zones
+    { "Motion",        "motion" },
     -- Audio detection
-    { "Audio: Speech", "audio" }, { "Audio: Bark", "audio" },
-    { "Audio: Scream", "audio" },  { "Audio: Yell", "audio" },
-    { "Audio: Fire Alarm", "audio" }, { "Audio: Glass Breaking", "audio" },
-    { "Audio: Siren", "audio" }, { "Audio: Car Horn", "audio" },
-    { "Audio: Music", "audio" },
-    -- GenAI object descriptions
-    { "Object Described", "descriptions" },
-    -- State changes
-    { "Detection Enabled", "status" }, { "Detection Disabled", "status" },
-    { "Recording Enabled", "status" }, { "Recording Disabled", "status" },
+    { "Smoke Alarm",   "audio" },
+    { "CO Alarm",      "audio" },
+    { "Siren",         "audio" },
+    { "Baby Cry",      "audio" },
+    { "Speaking",      "audio" },
+    { "Burglar Alarm", "audio" },
+    { "Car Horn",      "audio" },
+    { "Dog Bark",      "audio" },
+    { "Glass Break",   "audio" },
+    { "Porch Ring",    "audio" },
+}
+
+-- Frigate's object labels onto Control4's vocabulary. Anything unmapped is a
+-- Person-shaped nothing, so it falls to Motion rather than being invented.
+local OBJECT_TO_HISTORY_TYPE = {
+    person = "Person", car = "Vehicle", truck = "Vehicle", bus = "Vehicle",
+    motorcycle = "Vehicle", bicycle = "Vehicle", dog = "Animal",
+    cat = "Animal", bird = "Animal", horse = "Animal", package = "Package",
+    face = "Face", license_plate = "License Plate",
+}
+
+--- Frigate's object label as one of Control4's camera event types.
+local function objectHistoryType(objType)
+    if not objType or objType == "" then return "Motion" end
+    return OBJECT_TO_HISTORY_TYPE[objType:lower()] or "Motion"
+end
+
+-- Frigate's audio labels onto the same.
+local AUDIO_TO_HISTORY_TYPE = {
+    speech = "Speaking", bark = "Dog Bark", scream = "Burglar Alarm",
+    yell = "Burglar Alarm", fire_alarm = "Smoke Alarm",
+    glass_breaking = "Glass Break", siren = "Siren", car_horn = "Car Horn",
+    music = "Speaking",
 }
 
 local HISTORY_CATEGORY_OF = {}
@@ -518,12 +544,26 @@ local function frigateBase()
     return "http://" .. host .. ":" .. PORT_HTTP
 end
 
---- The proxy device the history is recorded against. Navigator matches a
---- stored record to a registration by this id, so both must use the same one.
+--- The camera proxy device the history is recorded against. Navigator matches
+--- a stored record to a registration by this id, so both must use the same
+--- one, and it has to be the bound camera proxy rather than whatever
+--- GetProxyDevices happens to return first -- Director rejects a registration
+--- against the driver's own device id.
 local function proxyDeviceIdForHistory()
+    local id
+    pcall(function()
+        local bound = C4:GetBoundConsumerDevices(C4:GetDeviceID(), PROXY_ID)
+        if type(bound) == "table" then id = next(bound) end
+    end)
+    if id then return id end
+    -- Older firmware, or a driver whose binding reports nothing: fall back to
+    -- the proxy list rather than giving up on history entirely.
     local proxyDevices = C4:GetProxyDevices()
-    if type(proxyDevices) ~= "table" then return nil end
-    for id in pairs(proxyDevices) do return id end
+    if type(proxyDevices) == "table" then
+        for pid in pairs(proxyDevices) do return pid end
+    elseif type(proxyDevices) == "number" then
+        return proxyDevices
+    end
     return nil
 end
 
@@ -753,12 +793,8 @@ end
 --- the title goes in the description.
 local function reviewHistoryType(p)
     local first = (p.objects or ""):match("^[^,]+")
-    if not first or first == "" then return "Object Detected" end
-    local friendly = friendlyObject((first:gsub("%s+$", "")))
-    if HISTORY_CATEGORY_OF[friendly .. " Detected"] then
-        return friendly .. " Detected"
-    end
-    return "Object Detected"
+    if not first or first == "" then return "Motion" end
+    return objectHistoryType((first:gsub("%s+$", "")))
 end
 
 local function emitReview(id, p)
@@ -923,7 +959,7 @@ end
 local function handleObjectDescription(tParams)
     local description = tParams.description or ""
     if description == "" then return end
-    recordHistory(description, "Info", "Object Described", tParams.id)
+    recordHistory(description, "Info", "Person", tParams.id, "descriptions")
 end
 
 ------------------------------------------------------------------------
@@ -993,11 +1029,11 @@ local function handleDetection(tParams)
         if count > 0 and eventType == "new" then
             fireEvent("Person Detected")
             fireEvent("Object Detected")
-            recordHistory(friendly .. " detected", "Info", friendly .. " Detected")
+            recordHistory(friendly .. " detected", "Info", objectHistoryType(objType))
         elseif count == 0 then
             fireEvent("Person Left")
             fireEvent("Object Left")
-            recordHistory(friendly .. " left", "Info", friendly .. " Left")
+            recordHistory(friendly .. " left", "Info", objectHistoryType(objType))
         end
     elseif objType == "car" then
         setVar(VAR.CAR_COUNT, count)
@@ -1006,11 +1042,11 @@ local function handleDetection(tParams)
         if count > 0 and eventType == "new" then
             fireEvent("Car Detected")
             fireEvent("Object Detected")
-            recordHistory(friendly .. " detected", "Info", friendly .. " Detected")
+            recordHistory(friendly .. " detected", "Info", objectHistoryType(objType))
         elseif count == 0 then
             fireEvent("Car Left")
             fireEvent("Object Left")
-            recordHistory(friendly .. " left", "Info", friendly .. " Left")
+            recordHistory(friendly .. " left", "Info", objectHistoryType(objType))
         end
     elseif objType == "dog" then
         setVar(VAR.DOG_DETECTED, count > 0 and "true" or "false")
@@ -1018,10 +1054,10 @@ local function handleDetection(tParams)
         if count > 0 and eventType == "new" then
             fireEvent("Dog Detected")
             fireEvent("Object Detected")
-            recordHistory(friendly .. " detected", "Info", friendly .. " Detected")
+            recordHistory(friendly .. " detected", "Info", objectHistoryType(objType))
         elseif count == 0 then
             fireEvent("Object Left")
-            recordHistory(friendly .. " left", "Info", friendly .. " Left")
+            recordHistory(friendly .. " left", "Info", objectHistoryType(objType))
         end
     elseif objType == "cat" then
         setVar(VAR.CAT_DETECTED, count > 0 and "true" or "false")
@@ -1029,19 +1065,19 @@ local function handleDetection(tParams)
         if count > 0 and eventType == "new" then
             fireEvent("Cat Detected")
             fireEvent("Object Detected")
-            recordHistory(friendly .. " detected", "Info", friendly .. " Detected")
+            recordHistory(friendly .. " detected", "Info", objectHistoryType(objType))
         elseif count == 0 then
             fireEvent("Object Left")
-            recordHistory(friendly .. " left", "Info", friendly .. " Left")
+            recordHistory(friendly .. " left", "Info", objectHistoryType(objType))
         end
     else
         -- Generic object
         if count > 0 and eventType == "new" then
             fireEvent("Object Detected")
-            recordHistory(friendly .. " detected", "Info", friendly .. " Detected")
+            recordHistory(friendly .. " detected", "Info", objectHistoryType(objType))
         elseif count == 0 then
             fireEvent("Object Left")
-            recordHistory(friendly .. " left", "Info", friendly .. " Left")
+            recordHistory(friendly .. " left", "Info", objectHistoryType(objType))
         end
     end
 
@@ -1065,10 +1101,10 @@ local function handleMotion(tParams)
         setVar(VAR.MOTION_LAST_SEEN, ts)
         C4:UpdateProperty(PROP_LAST_MOTION, ts)
         fireEvent("Motion Detected")
-        recordHistory("Motion detected", "Info", "Motion Detected")
+        recordHistory("Motion detected", "Info", "Motion")
     else
         fireEvent("Motion Stopped")
-        recordHistory("Motion stopped", "Info", "Motion Stopped")
+        recordHistory("Motion stopped", "Info", "Motion")
     end
 end
 
@@ -1083,12 +1119,14 @@ local function handleZone(tParams)
 
     if count > 0 then
         fireEvent("Zone Entered")
-        recordHistory(friendly .. " entered zone: " .. friendlyZ, "Info", "Zone Entered")
+        recordHistory(friendly .. " entered zone: " .. friendlyZ, "Info",
+                      objectHistoryType(objType), nil, "zones")
     else
         -- Reset loitering when zone clears
         setVar(VAR.LOITERING_DETECTED, "false")
         fireEvent("Zone Exited")
-        recordHistory(friendly .. " left zone: " .. friendlyZ, "Info", "Zone Exited")
+        recordHistory(friendly .. " left zone: " .. friendlyZ, "Info",
+                      objectHistoryType(objType), nil, "zones")
     end
 end
 
@@ -1104,7 +1142,8 @@ local function handleLoitering(tParams)
     setVar(VAR.LOITERING_LAST_SEEN, timestamp())
 
     fireEvent("Loitering Detected")
-    recordHistory(friendly .. " loitering in zone: " .. friendlyZ, "Warning", "Loitering Detected")
+    recordHistory(friendly .. " loitering in zone: " .. friendlyZ, "Warning",
+                  objectHistoryType(objType), nil, "zones")
     C4:UpdateProperty(PROP_LAST_EVENT, friendly .. " loitering in " .. friendlyZ .. " — " .. timestamp())
 end
 
@@ -1118,11 +1157,11 @@ local function handleHealth(tParams)
     if online then
         fireEvent("Camera Online")
         setStatus("Online — " .. (cameraName() or ""))
-        recordHistory("Camera came online", "Info", "Camera Online")
+        recordHistory("Camera came online", "Info", "Motion", nil, "status")
     else
         fireEvent("Camera Offline")
         setStatus("Offline")
-        recordHistory("Camera went offline", "Warning", "Camera Offline")
+        recordHistory("Camera went offline", "Warning", "Motion", nil, "status")
     end
 end
 
@@ -1172,7 +1211,8 @@ local function handleAudio(tParams)
         fireEvent(eventName)
     end
     fireEvent("Audio Detected")
-    recordHistory("Audio: " .. friendly, "Info", "Audio: " .. friendly)
+    recordHistory("Audio: " .. friendly, "Info",
+                  AUDIO_TO_HISTORY_TYPE[audioType] or "Speaking", nil, "audio")
     C4:UpdateProperty(PROP_LAST_EVENT, "Audio: " .. friendly .. " — " .. ts)
 end
 
@@ -1191,19 +1231,19 @@ local function handleStateChange(tParams)
         setVar(VAR.DETECTION_ENABLED, enabled and "true" or "false")
         if enabled then
             fireEvent("Detection Enabled")
-            recordHistory("Detection enabled", "Info", "Detection Enabled")
+            recordHistory("Detection enabled", "Info", "Motion", nil, "status")
         else
             fireEvent("Detection Disabled")
-            recordHistory("Detection disabled", "Warning", "Detection Disabled")
+            recordHistory("Detection disabled", "Warning", "Motion", nil, "status")
         end
     elseif setting == "recordings" then
         setVar(VAR.RECORDING_ENABLED, enabled and "true" or "false")
         if enabled then
             fireEvent("Recording Enabled")
-            recordHistory("Recording enabled", "Info", "Recording Enabled")
+            recordHistory("Recording enabled", "Info", "Motion", nil, "status")
         else
             fireEvent("Recording Disabled")
-            recordHistory("Recording disabled", "Warning", "Recording Disabled")
+            recordHistory("Recording disabled", "Warning", "Motion", nil, "status")
         end
     end
 end
@@ -1241,11 +1281,24 @@ function GetNotificationAttachmentURL(idBinding, tParams)
 end
 
 --- Register detection events with the History Agent for push notifications.
+local historyRegistered = false
+local historyRegisterRetry = nil
+
 local function registerNotificationEvents()
+    if historyRegistered then return end
     local proxyDeviceId = proxyDeviceIdForHistory()
     if not proxyDeviceId then
-        log(LOG_WARNING, "RegisterEvents skipped — no proxy device id found; "
-            .. "history will not surface in the Control4 app")
+        -- The camera proxy binding is routinely not up at LateInit. Retrying
+        -- is the difference between history working and not, so this is not
+        -- a warning-and-give-up.
+        if not historyRegisterRetry then
+            log(LOG_DEBUG, "Camera proxy binding not up yet — "
+                .. "registering history in 5s")
+            historyRegisterRetry = C4:SetTimer(5000, function()
+                historyRegisterRetry = nil
+                registerNotificationEvents()
+            end)
+        end
         return
     end
 
@@ -1268,8 +1321,11 @@ local function registerNotificationEvents()
         .. '</category></categories></events>'
 
     local result = C4:RegisterEvents(xml)
-    if result == 0 then
-        log(LOG_INFO, "Registered notification events for device " .. proxyDeviceId)
+    if result == 0 or result == true then
+        historyRegistered = true
+        log(LOG_INFO, "Registered history events for camera proxy "
+            .. tostring(proxyDeviceId) .. " under " .. HISTORY_CATEGORY
+            .. "/" .. HISTORY_SUBCATEGORY)
     else
         log(LOG_WARNING, "RegisterEvents returned: " .. tostring(result))
     end

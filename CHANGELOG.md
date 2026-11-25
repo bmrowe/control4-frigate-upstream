@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **History entries carried no picture, because they were filed under a subcategory Navigator does not render.** Entries were written as `Cameras` / `Frigate` with event types of the driver's own invention (`Person Detected`, `Audio: Speech`). Navigator heads an entry with its event *type*, accepts only a registered type, and renders the attached image only for Control4's own camera history. Entries now use `Cameras` / `IP Camera` and Control4's own vocabulary — `Person`, `Vehicle`, `Animal`, `Package`, `Face`, `License Plate`, `Motion`, and the audio types — with Frigate's labels mapped onto that set. Descriptive text, including a GenAI summary, goes in the description.
+
+- **History was registered against the wrong device, and gave up when the binding was not ready.** Registration used the first entry of `GetProxyDevices()`; it now uses the camera proxy actually bound on 5001, which is what Director accepts. That binding is routinely not up at `OnDriverLateInit`, where the old code logged a warning and never tried again — it now retries every 5s until it succeeds.
+
 - **`frigate/available` = `online` raised instead of refreshing status.** `checkStatus` is a local defined below the MQTT router that calls it, so that call resolved to a global that is never set: every time Frigate came back, the driver logged `attempt to call global 'checkStatus' (a nil value)` and skipped the REST refresh. A Lua driver is read top to bottom, so this fails only when the branch is reached — the test suite now drives every topic shape through the router.
 
 - **`Unmatched Cameras` showed names from a previous run.** Properties persist in the project database, but the table behind this one does not survive a reload, and nothing put the two back in step at startup. The list on screen was whatever the last run wrote, including names a newer driver no longer considers unmatched. It is now reset at init.

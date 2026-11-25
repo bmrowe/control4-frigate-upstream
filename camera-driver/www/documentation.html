@@ -119,6 +119,14 @@
   <p>Detection events are recorded in the device history, visible in the Control4 app and on
   touchscreens. Loitering events are recorded with Warning severity; all others are Info.</p>
 
+  <p>Entries are written under Control4's own camera history category, <code>Cameras</code> /
+  <code>IP Camera</code>, using Control4's own camera event vocabulary — <code>Person</code>,
+  <code>Vehicle</code>, <code>Animal</code>, <code>Package</code>, <code>Face</code>,
+  <code>License Plate</code>, <code>Motion</code>, and the audio types. Navigator heads an entry
+  with its <i>type</i>, renders these with the attached picture, and only accepts a type that was
+  registered — so Frigate's labels are mapped onto this set rather than passed through, and the
+  descriptive text (including a GenAI summary) goes in the description.</p>
+
   <p><b>The history is for incidents; the Timeline is for everything.</b> Frigate's object-count,
   motion and zone topics all fire on every transition, so one walk up a drive produces eight rows
   that bury the single review entry already describing it — with a picture. Those categories default

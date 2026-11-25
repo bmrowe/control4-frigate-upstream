@@ -47,6 +47,9 @@ function C4:RegisterEvents(xml)
 end
 function C4:UpdateProperty(name, value) props[name] = value end
 function C4:GetProxyDevices() return {[827] = "camera"} end
+-- History registers against the bound camera proxy, not the proxy list.
+boundConsumerDevices = { [827] = "camera" }
+function C4:GetBoundConsumerDevices(deviceId, binding) return boundConsumerDevices end
 function C4:GetDeviceID() return 1586 end
 function C4:XmlEscapeString(s) return s end
 function C4:ErrorLog(msg) end
@@ -182,9 +185,10 @@ check("fired 'Object Detected'", fired["Object Detected"] == true)
 local h = history[1]
 check("recorded a history entry", h ~= nil)
 check("history severity == Info", h and h.severity == "Info", h and h.severity)
-check("history type == 'Person Detected'", h and h.etype == "Person Detected", h and h.etype)
+check("history type is Control4's own 'Person'", h and h.etype == "Person", h and h.etype)
 check("history category == 'Cameras'", h and h.category == "Cameras", h and h.category)
-check("history subcategory == 'Frigate'", h and h.subcategory == "Frigate", h and h.subcategory)
+check("history subcategory is Control4's own 'IP Camera'",
+      h and h.subcategory == "IP Camera", h and h.subcategory)
 check("stored via the plain four-argument form", h and h.meta == nil, h and type(h.meta))
 check("recorded category matches RegisterEvents",
       h and h.category == registeredCategory, registeredCategory)
@@ -340,7 +344,7 @@ Properties["Record Motion Events"] = "Yes"
 history = {}
 ExecuteCommand("FRIGATE_MOTION", { active = true })
 check("motion is recorded once switched on",
-      historyTypes()["Motion Detected"] == true, #history)
+      historyTypes()["Motion"] == true, #history)
 Properties["Record Motion Events"] = nil
 
 -- The other categories keep the previous always-record behaviour.
@@ -348,7 +352,7 @@ Properties["Record Object Detections"] = "Yes"
 history = {}
 ExecuteCommand("FRIGATE_DETECTION", { object_type = "person", count = 1, event_type = "new" })
 check("object detections record once switched on",
-      historyTypes()["Person Detected"] == true, #history)
+      historyTypes()["Person"] == true, #history)
 Properties["Record Object Detections"] = nil
 
 Properties["Record Object Detections"] = nil
@@ -365,7 +369,7 @@ Properties["Record Zone Events"] = "Yes"
 history = {}
 ExecuteCommand("FRIGATE_ZONE", { zone = "driveway", object_type = "person", count = 1 })
 check("zone events record once switched on",
-      historyTypes()["Zone Entered"] == true, #history)
+      historyTypes()["Person"] == true, #history)
 Properties["Record Zone Events"] = nil
 
 -- Audio and camera status are discrete and rare, so they stay on.
@@ -375,13 +379,18 @@ check("audio detections still record by default", #history > 0, #history)
 
 -- A switch gates what is written, never what Navigator can display: the
 -- registration must cover every type so turning one back on needs no reload.
-check("motion types stay registered while suppressed",
-      registeredTypes["Motion Detected"] and registeredTypes["Motion Stopped"])
-check("every object type stays registered",
-      registeredTypes["Person Detected"] and registeredTypes["Object Left"])
-check("audio and status types stay registered",
-      registeredTypes["Audio: Speech"] and registeredTypes["Camera Offline"]
-      and registeredTypes["Recording Disabled"])
+check("the motion type stays registered while suppressed",
+      registeredTypes["Motion"] == true)
+check("the object types stay registered",
+      registeredTypes["Person"] and registeredTypes["Vehicle"]
+      and registeredTypes["Animal"] and registeredTypes["Package"])
+check("the audio types stay registered",
+      registeredTypes["Speaking"] and registeredTypes["Glass Break"]
+      and registeredTypes["Siren"] and registeredTypes["Smoke Alarm"])
+check("no type of our own invention is registered",
+      registeredTypes["Person Detected"] == nil
+      and registeredTypes["Audio: Speech"] == nil
+      and registeredTypes["Review Alert"] == nil)
 
 ------------------------------------------------------------------------
 -- Timeline agent reporting
@@ -603,8 +612,11 @@ check("it does not also go through C4:RecordHistory", #history == 0, #history)
 -- Navigator lists an entry by its TYPE, which must be a registered one, so
 -- the objects name the row and the GenAI title goes in the description.
 check("the entry is typed by the object, not a generic heading",
-      (agentRecords[1] or {}).params.TYPE == "Person Detected",
+      (agentRecords[1] or {}).params.TYPE == "Person",
       (agentRecords[1] or {}).params.TYPE)
+check("it is recorded under Control4's own camera subcategory",
+      (agentRecords[1] or {}).params.SUBCATEGORY == "IP Camera",
+      (agentRecords[1] or {}).params.SUBCATEGORY)
 check("the type it uses is one that was registered",
       registeredTypes[(agentRecords[1] or {}).params.TYPE] == true)
 check("the GenAI summary is the description",
@@ -710,17 +722,17 @@ check("it writes no history entry, which would be stamped now",
 agentRecords = {}
 review({ id = "typecar", review_type = "genai", title = "Car in drive",
          objects = "car", detections = "ec" })
-check("a car review is typed as a car",
-      (agentRecords[1] or {}).params.TYPE == "Car Detected",
+check("a car review is typed as Control4's Vehicle",
+      (agentRecords[1] or {}).params.TYPE == "Vehicle",
       (agentRecords[1] or {}).params.TYPE)
 agentRecords = {}
 review({ id = "typeodd", review_type = "genai", title = "Thing",
          objects = "squirrel", detections = "es" })
-check("an object Frigate has no registered type for falls back",
-      (agentRecords[1] or {}).params.TYPE == "Object Detected",
+check("an object Control4 has no type for falls back to Motion",
+      (agentRecords[1] or {}).params.TYPE == "Motion",
       (agentRecords[1] or {}).params.TYPE)
 check("the fallback type is a registered one",
-      registeredTypes["Object Detected"] == true)
+      registeredTypes["Motion"] == true)
 
 -- A review follows the review switch, although it is listed under an object
 -- type: the two are gated separately and the object switch is off by default.
@@ -762,8 +774,10 @@ check("the description text is what is stored",
 check("the described object's own snapshot is fetched",
       (urlGetCalls[1] or ""):find("1755012345.1-abc", 1, true) ~= nil, urlGetCalls[1])
 check("the picture is attached to the description", #agentMetadata == 1, #agentMetadata)
-check("the description type is registered",
-      registeredTypes["Object Described"] == true)
+check("the description is typed as a registered type",
+      (agentRecords[1] or {}).params.TYPE == "Person"
+      and registeredTypes["Person"] == true,
+      (agentRecords[1] or {}).params.TYPE)
 check("a description does not also create a Timeline entry",
       #timelinePayloads == 0, #timelinePayloads)
 
