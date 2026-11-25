@@ -218,6 +218,29 @@
   <code>Object Described</code>, rather than amending an entry already written, and follows the
   <code>Record Object Detections</code> switch.</p>
 
+  <h3>Choosing the stream</h3>
+  <p><code>Use Sub Stream</code> plays Frigate's own <code>&lt;camera&gt;_sub</code>.
+  <code>Stream Suffix</code> names any other go2rtc entry instead and overrides the checkbox when
+  set — <code>_t4</code> would play <code>&lt;camera&gt;_t4</code>.</p>
+
+  <p>This is what a Control4 <b>T4 panel</b> needs. Measured against the panel: H.264 Level 5.1 is
+  refused outright whatever the resolution, and full resolution still fails at Level 4.2; 1920x1080
+  Main@4.0 plays. The panel and the phone app use different decoders and disagree, so a stream that
+  works on the phone proves nothing about the panel. The fix is a go2rtc entry per camera that
+  re-encodes to <code>#height=1080</code> through a Main@4.0 template, with <code>-threads 1</code>
+  so each frame is one slice and <code>-bsf:v dump_extra=freq=keyframe</code> so the parameter sets
+  are in-band rather than only in the SDP — without the latter, the phone app spins forever. Cap the
+  bitrate explicitly (<code>-b:v 4M -maxrate 4M -bufsize 8M</code>): libx264 otherwise runs at
+  constant quality, and moving water produced 27&nbsp;Mbps, which the panel renders in bursts that
+  look like stutter. Such an entry is not a Frigate camera, so it never appears in the camera list —
+  which is why it has to be named here.</p>
+
+  <p><code>Camera Audio</code> set to <code>Disabled</code> appends go2rtc's <code>?video</code>, so
+  the stream carries the video track alone. Control4 plays G.711 u-law — a go2rtc
+  <code>#audio=pcmu</code> transcode renders in the iOS app — but not the AAC many cameras emit,
+  which can leave a client silent or stalled. This has nothing to do with a T4's intercom, which is
+  a separate Control4 subsystem.</p>
+
   <h2>Requirements</h2>
   <ul>
     <li>Control4 OS 3.3.0 or newer</li>

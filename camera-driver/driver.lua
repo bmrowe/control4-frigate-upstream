@@ -27,6 +27,8 @@ local PROP_VERSION     = "Driver Version"
 local PROP_HOST        = "Frigate Host"
 local PROP_CAMERA      = "Camera Name"
 local PROP_SUB_STREAM  = "Use Sub Stream"
+local PROP_STREAM_SUFFIX = "Stream Suffix"
+local PROP_CAMERA_AUDIO  = "Camera Audio"
 local PROP_STATUS      = "Camera Status"
 local PROP_LAST_EVENT  = "Last Event"
 local PROP_LAST_MOTION = "Last Motion"
@@ -160,13 +162,38 @@ function __lastEvent() return lastEvent end
 -- Helpers
 ------------------------------------------------------------------------
 
+--- The go2rtc stream this camera plays from.
+---
+--- Use Sub Stream picks Frigate's own <camera>_sub. Stream Suffix names any
+--- other go2rtc entry instead, which is what a client that cannot decode the
+--- camera's own stream needs: a Control4 T4 panel refuses H.264 Level 5.1
+--- outright, and refuses full resolution even at 4.2, so it needs an entry
+--- that re-encodes to 1080p Main@4.0. That entry is not a Frigate camera and
+--- so never appears in the camera list -- it has to be named, not derived.
+--- An explicit suffix wins, because it was typed and the checkbox was not.
 local function streamName()
     local cam = Properties[PROP_CAMERA] or ""
     if cam == "" then return nil end
+    local suffix = Properties[PROP_STREAM_SUFFIX] or ""
+    if suffix ~= "" then return cam .. suffix end
     if Properties[PROP_SUB_STREAM] == "Yes" then
         return cam .. "_sub"
     end
     return cam
+end
+
+--- go2rtc serves H.264 on trackID=0 and the camera's audio on trackID=1.
+--- "?video" returns the video track alone, so a client that will not play the
+--- camera's audio codec -- Control4 takes G.711 but not the AAC these cameras
+--- emit -- gets a stream it can render rather than silence or a stall. No SDP
+--- rewriting needed; go2rtc does the selecting.
+local function rtspPath()
+    local src = streamName()
+    if not src then return nil end
+    if (Properties[PROP_CAMERA_AUDIO] or "Enabled") == "Disabled" then
+        return src .. "?video"
+    end
+    return src
 end
 
 local function cameraName()
@@ -1367,7 +1394,7 @@ function getStreamURLs(tParams)
 
     local mjpegURL    = "http://" .. host .. ":" .. PORT_HTTP .. "/api/" .. cam
     local snapshotURL = "http://" .. host .. ":" .. PORT_HTTP .. "/api/" .. cam .. "/latest.jpg"
-    local rtspURL     = "rtsp://" .. host .. ":" .. PORT_RTSP .. "/" .. (src or cam)
+    local rtspURL     = "rtsp://" .. host .. ":" .. PORT_RTSP .. "/" .. (rtspPath() or cam)
 
     local key = tParams and tParams["KEY"] or "1"
 
@@ -1415,7 +1442,7 @@ function getMJPEGQueryString(tParams)
 end
 
 function getRTSPH264QueryString()
-    local src = streamName()
+    local src = rtspPath()
     if not src then return "" end
     return "<rtsp_h264_query_string>" .. C4:XmlEscapeString(src) .. "</rtsp_h264_query_string>"
 end
@@ -1569,6 +1596,8 @@ end
 
 function OnPropertyChanged(sProperty)
     if sProperty == PROP_HOST or sProperty == PROP_CAMERA or sProperty == PROP_SUB_STREAM then
+        updateProxy()
+    elseif sProperty == PROP_STREAM_SUFFIX or sProperty == PROP_CAMERA_AUDIO then
         updateProxy()
     elseif sProperty == PROP_TIMELINE then
         refreshTimelineStatus()

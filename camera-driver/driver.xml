@@ -99,6 +99,24 @@
         <readonly>false</readonly>
       </property>
       <property>
+        <name>Stream Suffix</name>
+        <type>STRING</type>
+        <default></default>
+        <readonly>false</readonly>
+        <description>Play from a named go2rtc entry rather than the camera itself, e.g. _t4 for an entry that re-encodes to 1080p Main@4.0. A Control4 T4 panel refuses H.264 Level 5.1 outright and refuses full resolution even at Level 4.2, so it needs such an entry to decode at all. The entry is not a Frigate camera, so it does not appear in the camera list and has to be named here. Overrides Use Sub Stream when set; leave empty for normal operation.</description>
+      </property>
+      <property>
+        <name>Camera Audio</name>
+        <type>LIST</type>
+        <default>Enabled</default>
+        <readonly>false</readonly>
+        <items>
+          <item>Enabled</item>
+          <item>Disabled</item>
+        </items>
+        <description>Disabled requests the video track alone (go2rtc "?video"). Control4 plays G.711 u-law but not the AAC many cameras emit, which can leave a client silent or stalled; this gives it video only. Does not affect a T4's intercom, which is a separate subsystem.</description>
+      </property>
+      <property>
         <name>Camera Status</name>
         <type>STRING</type>
         <default>Not Configured</default>

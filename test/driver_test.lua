@@ -802,6 +802,62 @@ check("descriptions have their own switch",
 Properties["Record Object Descriptions"] = nil
 
 ------------------------------------------------------------------------
+-- Which go2rtc stream, and whether it carries audio
+------------------------------------------------------------------------
+-- A T4 panel refuses H.264 Level 5.1 outright and refuses full resolution
+-- even at 4.2, so it needs a go2rtc entry that re-encodes. That entry is not
+-- a Frigate camera and never appears in the camera list, so it is named here
+-- rather than derived from the camera's own name.
+local function rtspOf()
+    local xml = getStreamURLs({ KEY = "1" })
+    return xml:match('url="(rtsp://[^"]*)"') or ""
+end
+
+Properties["Stream Suffix"], Properties["Use Sub Stream"] = nil, "No"
+Properties["Camera Audio"] = nil
+check("by default the camera's own stream is played",
+      rtspOf():match("/bbq$") ~= nil, rtspOf())
+
+Properties["Use Sub Stream"] = "Yes"
+check("Use Sub Stream picks Frigate's own sub-stream",
+      rtspOf():match("/bbq_sub$") ~= nil, rtspOf())
+
+Properties["Stream Suffix"] = "_t4"
+check("a named entry overrides the sub-stream checkbox",
+      rtspOf():match("/bbq_t4$") ~= nil, rtspOf())
+check("the H264 query string names the same entry",
+      getRTSPH264QueryString():find("bbq_t4", 1, true) ~= nil,
+      getRTSPH264QueryString())
+
+-- Control4 plays G.711 but not the AAC these cameras emit, so a client that
+-- will not take the audio track needs the video one alone.
+Properties["Camera Audio"] = "Disabled"
+check("disabling audio asks go2rtc for the video track alone",
+      rtspOf():match("/bbq_t4%?video$") ~= nil, rtspOf())
+check("the H264 query string carries it too",
+      getRTSPH264QueryString():find("?video", 1, true) ~= nil,
+      getRTSPH264QueryString())
+
+Properties["Camera Audio"] = "Enabled"
+check("re-enabling audio drops the video-only selector",
+      rtspOf():find("?video", 1, true) == nil, rtspOf())
+
+-- The snapshot and MJPEG paths are the camera, never the re-encode entry:
+-- a go2rtc entry is not a Frigate camera and has no /api/<name>/latest.jpg.
+check("snapshots still come from the camera, not the stream entry",
+      getStreamURLs({ KEY = "1" }):find("api/bbq/latest.jpg", 1, true) ~= nil)
+check("an empty suffix is not appended",
+      (function()
+          Properties["Stream Suffix"] = ""
+          Properties["Use Sub Stream"] = "No"
+          return rtspOf():match("/bbq$") ~= nil
+      end)(), rtspOf())
+
+Properties["Stream Suffix"] = nil
+Properties["Use Sub Stream"] = "Yes"
+Properties["Camera Audio"] = nil
+
+------------------------------------------------------------------------
 -- Image size is what Navigator asked for
 ------------------------------------------------------------------------
 -- The camera list draws every camera at once. Serving a full-resolution
