@@ -296,7 +296,7 @@ check("an empty description is ignored",
 -- as frigate/<camera>/<object>. Without the configured zone names, every
 -- zone looked like a camera that did not exist.
 local CONFIG = [[
-{"mqtt":{"host":"192.168.1.146","port":1883},
+{"mqtt":{"host":"192.168.1.50","port":1883},
  "cameras":{
    "bbq":{"ffmpeg":{"inputs":[{"path":"rtsp://x","roles":["detect"]}]},
           "detect":{"width":1280,"height":720},
