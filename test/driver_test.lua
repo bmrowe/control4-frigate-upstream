@@ -455,6 +455,7 @@ local function review(t)
         title = t.title or "", summary = t.summary or "",
         threat_level = t.threat_level or 0,
         detections = t.detections or "",
+        replay = t.replay or "false",
     }
     ExecuteCommand("FRIGATE_REVIEW", p)
 end
@@ -599,9 +600,13 @@ review({ id = "img-ok", review_type = "genai", title = "Person at door",
          detections = "1755012345.1-abc,1755012346.2-def" })
 check("the entry goes through the history agent", #agentRecords == 1, #agentRecords)
 check("it does not also go through C4:RecordHistory", #history == 0, #history)
-check("the agent record names the event type",
-      (agentRecords[1] or {}).params.TYPE == "Review Alert",
+-- Navigator lists an entry by its TYPE, which must be a registered one, so
+-- the objects name the row and the GenAI title goes in the description.
+check("the entry is typed by the object, not a generic heading",
+      (agentRecords[1] or {}).params.TYPE == "Person Detected",
       (agentRecords[1] or {}).params.TYPE)
+check("the type it uses is one that was registered",
+      registeredTypes[(agentRecords[1] or {}).params.TYPE] == true)
 check("the GenAI summary is the description",
       (agentRecords[1] or {}).params.DESCRIPTION == "Person at door",
       (agentRecords[1] or {}).params.DESCRIPTION)
@@ -683,6 +688,65 @@ check("every incident still got an image", #agentMetadata == 60, #agentMetadata)
 Properties["Timeline Summary Wait (seconds)"] = "45"
 
 ------------------------------------------------------------------------
+-- A replayed review fills the Timeline, not the history
+------------------------------------------------------------------------
+-- RECORD_HISTORICAL_EVENT takes no timestamp, so a history entry for an
+-- incident from two days ago would be stamped now. SetPastEvent does take
+-- one, so the Timeline places it correctly.
+historyAgentDeviceId = 777
+Properties["Timeline Summary Wait (seconds)"] = "Off"
+timelinePayloads, history, agentRecords = {}, {}, {}
+review({ id = "replay-1", review_type = "genai", title = "Person at the door",
+         start_time = 1755000000, detections = "ev1", replay = "true" })
+check("a replayed review reaches the Timeline", #timelinePayloads == 1,
+      #timelinePayloads)
+check("it keeps its original timestamp",
+      (timelinePayloads[1] or ""):find('"timestamp":1755000000') ~= nil,
+      timelinePayloads[1])
+check("it writes no history entry, which would be stamped now",
+      #history == 0 and #agentRecords == 0, #history + #agentRecords)
+
+-- The row is headed by the object the review was built from.
+agentRecords = {}
+review({ id = "typecar", review_type = "genai", title = "Car in drive",
+         objects = "car", detections = "ec" })
+check("a car review is typed as a car",
+      (agentRecords[1] or {}).params.TYPE == "Car Detected",
+      (agentRecords[1] or {}).params.TYPE)
+agentRecords = {}
+review({ id = "typeodd", review_type = "genai", title = "Thing",
+         objects = "squirrel", detections = "es" })
+check("an object Frigate has no registered type for falls back",
+      (agentRecords[1] or {}).params.TYPE == "Object Detected",
+      (agentRecords[1] or {}).params.TYPE)
+check("the fallback type is a registered one",
+      registeredTypes["Object Detected"] == true)
+
+-- A review follows the review switch, although it is listed under an object
+-- type: the two are gated separately and the object switch is off by default.
+Properties["Record Review Incidents"] = "No"
+agentRecords, history = {}, {}
+review({ id = "revoff", review_type = "genai", title = "x",
+         objects = "person", detections = "ep" })
+check("the review switch suppresses a review entry",
+      #agentRecords == 0 and #history == 0, #agentRecords + #history)
+Properties["Record Review Incidents"] = nil
+agentRecords = {}
+review({ id = "revon", review_type = "genai", title = "x",
+         objects = "person", detections = "ep2" })
+check("a review records although object detections are off",
+      #agentRecords == 1, #agentRecords)
+
+-- A live one still does both.
+timelinePayloads, history, agentRecords = {}, {}, {}
+review({ id = "live-1", review_type = "genai", title = "Person at the door",
+         start_time = 1755000001, detections = "ev2" })
+check("a live review reaches both the Timeline and the history",
+      #timelinePayloads == 1 and #agentRecords == 1,
+      ("timeline=%d history=%d"):format(#timelinePayloads, #agentRecords))
+Properties["Timeline Summary Wait (seconds)"] = "45"
+
+------------------------------------------------------------------------
 -- GenAI object descriptions
 ------------------------------------------------------------------------
 historyAgentDeviceId = 777
@@ -700,7 +764,6 @@ check("the described object's own snapshot is fetched",
 check("the picture is attached to the description", #agentMetadata == 1, #agentMetadata)
 check("the description type is registered",
       registeredTypes["Object Described"] == true)
-check("the review type is registered", registeredTypes["Review Alert"] == true)
 check("a description does not also create a Timeline entry",
       #timelinePayloads == 0, #timelinePayloads)
 

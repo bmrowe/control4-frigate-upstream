@@ -161,7 +161,9 @@
   the driver names objects, so it reads <i>"Person, Car"</i> rather than <i>"person, car"</i>.</p>
 
   <p>The Timeline need not start empty: the NVR's <b>Send Recent Reviews to Timeline</b> action
-  replays recent review items from Frigate's API, each stamped with its own start time.</p>
+  replays recent review items from Frigate's API, each stamped with its own start time. A replay
+  fills the Timeline only — the history records an entry at the moment it is written, with no way to
+  backdate it, so replayed incidents would all carry the time of the replay.</p>
 
   <p><code>Timeline Review Severity</code> chooses which review severities qualify. The default,
   <code>Alerts only</code>, keeps the Timeline to what Frigate itself considers worth looking at.</p>

@@ -477,12 +477,24 @@ check("a review for a known camera is forwarded", #forwarded == 1, #forwarded)
 check("it is sent as genai, so the child does not wait for a summary",
       forwarded[1] and forwarded[1].params.review_type == "genai",
       forwarded[1] and forwarded[1].params.review_type)
+check("a live review is not flagged as a replay",
+      (function()
+          sent = {}
+          handleReviewJSON([[{"type":"end","before":{},"after":{"id":"liveflag",
+            "camera":"bbq","severity":"alert","start_time":1,
+            "data":{"objects":["person"]}}}]])
+          local m = findSent("FRIGATE_REVIEW")
+          return m and m.params.replay == "false"
+      end)())
 check("the review id is carried, so the child can deduplicate",
       forwarded[1] and forwarded[1].params.id == "1795557732.665197-02w8qb",
       forwarded[1] and forwarded[1].params.id)
 check("the original start time is carried, not the replay time",
       forwarded[1] and forwarded[1].params.start_time == 1795557732.665197,
       forwarded[1] and forwarded[1].params.start_time)
+check("a replayed review is flagged as a replay",
+      forwarded[1] and forwarded[1].params.replay == "true",
+      forwarded[1] and forwarded[1].params.replay)
 check("the tracked object is carried, so the entry can have a picture",
       forwarded[1] and forwarded[1].params.detections == "1795557732.1-aaa",
       forwarded[1] and forwarded[1].params.detections)

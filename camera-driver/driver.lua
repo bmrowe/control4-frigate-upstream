@@ -299,8 +299,6 @@ local HISTORY_EVENTS = {
     { "Audio: Fire Alarm", "audio" }, { "Audio: Glass Breaking", "audio" },
     { "Audio: Siren", "audio" }, { "Audio: Car Horn", "audio" },
     { "Audio: Music", "audio" },
-    -- Review incidents
-    { "Review Alert", "reviews" },
     -- GenAI object descriptions
     { "Object Described", "descriptions" },
     -- State changes
@@ -337,8 +335,12 @@ local HISTORY_CATEGORY_DEFAULT = {
 
 --- Whether this event type should be written to the history.
 --- An unknown type records, so adding one cannot silently lose it.
-local function historyEnabled(eventType)
-    local category = HISTORY_CATEGORY_OF[eventType]
+--- `category` overrides the one the event type belongs to. A review incident
+--- is listed under an object type, because Navigator heads an entry with its
+--- type and a type must be registered -- but it is a review, and must follow
+--- the review switch rather than the object-detection one.
+local function historyEnabled(eventType, category)
+    category = category or HISTORY_CATEGORY_OF[eventType]
     if not category then return true end
     local value = Properties[HISTORY_CATEGORY_PROP[category]]
     if value == nil or value == "" then
@@ -744,6 +746,21 @@ local function reviewLabel(p)
     return "Activity"
 end
 
+--- Navigator lists a history entry by its event TYPE, and a type has to be
+--- one of the registered set, so a GenAI title cannot be the heading -- it is
+--- free text. Naming the objects gives a list that reads like the detections
+--- it describes rather than a column of identical "Review Alert" rows, and
+--- the title goes in the description.
+local function reviewHistoryType(p)
+    local first = (p.objects or ""):match("^[^,]+")
+    if not first or first == "" then return "Object Detected" end
+    local friendly = friendlyObject((first:gsub("%s+$", "")))
+    if HISTORY_CATEGORY_OF[friendly .. " Detected"] then
+        return friendly .. " Detected"
+    end
+    return "Object Detected"
+end
+
 local function emitReview(id, p)
     if reviewSeen[id] then return end
     rememberReview(id)
@@ -752,14 +769,26 @@ local function emitReview(id, p)
     local label = reviewLabel(p)
     reportTimeline(label, tonumber(p.start_time))
 
-    -- The incident is also worth a history entry, and unlike the Timeline the
-    -- history can carry the picture. The review names the tracked objects it
-    -- was built from, so the first one's snapshot is the image for the whole
-    -- incident.
+    -- A replayed review already happened, sometimes days ago. The Timeline
+    -- takes a timestamp and places it correctly; RECORD_HISTORICAL_EVENT has
+    -- no timestamp we know of, so a history entry for it would be stamped
+    -- now. Twenty-seven incidents all dated this minute is worse than none,
+    -- so a replay fills the Timeline only.
+    if p.replay == "true" then
+        log(LOG_DEBUG, "Review " .. id .. " replayed to the Timeline only")
+        return
+    end
+
+    -- Live incidents are worth a history entry too, and unlike the Timeline
+    -- the history can carry the picture. The review names the tracked objects
+    -- it was built from, so the first one's snapshot is the image for the
+    -- whole incident.
     local description = p.summary
     if not description or description == "" then description = label end
-    recordHistory(description, (tonumber(p.threat_level) or 0) >= 2 and "Warning" or "Info",
-                  "Review Alert", (p.detections or ""):match("^[^,]+"))
+    recordHistory(description,
+                  (tonumber(p.threat_level) or 0) >= 2 and "Warning" or "Info",
+                  reviewHistoryType(p), (p.detections or ""):match("^[^,]+"),
+                  "reviews")
 end
 
 --- Handle a review segment forwarded by the NVR.
@@ -827,14 +856,14 @@ end
 --- `eventId` is a Frigate event id; when one is given and images are on, the
 --- entry is recorded through the History agent so its snapshot can be
 --- attached. Everything else goes the plain C4:RecordHistory route.
-function recordHistory(message, severity, eventType, eventId)
+function recordHistory(message, severity, eventType, eventId, category)
     severity = severity or "Info"
     if severity ~= "Info" and severity ~= "Warning" and severity ~= "Critical" then
         severity = "Info"
     end
     eventType = eventType or "Camera Event"
 
-    if not historyEnabled(eventType) then
+    if not historyEnabled(eventType, category) then
         log(LOG_DEBUG, "History suppressed by settings: " .. eventType)
         return
     end

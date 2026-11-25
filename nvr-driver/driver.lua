@@ -445,7 +445,7 @@ end
 --- Forward one review object to the camera it belongs to.
 --- `obj` is a review segment: the `after` of an MQTT message, or a row from
 --- /api/review, which returns the same shape.
-function forwardReview(obj, msgType)
+function forwardReview(obj, msgType, isReplay)
     local camera = jsonString(obj, "camera")
     if not camera then
         log(LOG_DEBUG, "Review has no 'camera' — discarding")
@@ -458,6 +458,9 @@ function forwardReview(obj, msgType)
     sendToCamera(camera, "FRIGATE_REVIEW", {
         id          = jsonString(obj, "id") or "",
         review_type = msgType,
+        -- A replayed incident already happened; the child writes it to the
+        -- Timeline, which is timestamped, and not to the history, which is not.
+        replay      = isReplay and "true" or "false",
         severity    = jsonString(obj, "severity") or "",
         start_time  = jsonNumber(obj, "start_time") or 0,
         end_time    = jsonNumber(obj, "end_time") or 0,
@@ -545,7 +548,9 @@ function replayReviews(limit)
         for i = #rows, 1, -1 do
             -- genai, not end: these are finished, so there is no summary
             -- still to wait for. Whatever metadata they have is final.
-            if forwardReview(rows[i], "genai") then sentCount = sentCount + 1 end
+            if forwardReview(rows[i], "genai", true) then
+                sentCount = sentCount + 1
+            end
         end
         log(LOG_INFO, "Replayed " .. sentCount .. " of " .. #rows
             .. " review item(s) to the Timeline")
