@@ -735,6 +735,27 @@ check("an object Control4 has no type for falls back to Motion",
 check("the fallback type is a registered one",
       registeredTypes["Motion"] == true)
 
+-- A delivery arrives as `amazon, car, person`: Frigate's order, with a carrier
+-- attribute first. Heading by the first label filed it as Motion.
+agentRecords = {}
+review({ id = "typedelivery", review_type = "genai", title = "Delivery",
+         objects = "amazon, car, person", detections = "ed" })
+check("a review is headed by its person, whatever order Frigate lists labels in",
+      (agentRecords[1] or {}).params.TYPE == "Person",
+      (agentRecords[1] or {}).params.TYPE)
+agentRecords = {}
+review({ id = "typecarrier", review_type = "genai", title = "Van",
+         objects = "ups", detections = "eu" })
+check("a carrier logo alone is filed as a package delivery",
+      (agentRecords[1] or {}).params.TYPE == "Package",
+      (agentRecords[1] or {}).params.TYPE)
+agentRecords = {}
+review({ id = "typeranked", review_type = "genai", title = "Car and dog",
+         objects = "dog, car", detections = "er" })
+check("a vehicle outranks an animal",
+      (agentRecords[1] or {}).params.TYPE == "Vehicle",
+      (agentRecords[1] or {}).params.TYPE)
+
 -- A review follows the review switch, although it is listed under an object
 -- type: the two are gated separately and the object switch is off by default.
 Properties["Record Review Incidents"] = "No"
@@ -763,6 +784,15 @@ Properties["Timeline Summary Wait (seconds)"] = "45"
 -- GenAI object descriptions
 ------------------------------------------------------------------------
 historyAgentDeviceId = 777
+-- Off by default: one delivery is a review plus a description per tracked
+-- object, and those extra rows are what Frigate's single item turned into.
+history, agentRecords = {}, {}
+ExecuteCommand("FRIGATE_OBJECT_DESCRIPTION",
+    { id = "off-1", description = "A man walks up the path." })
+check("descriptions stay out of the history by default",
+      #history == 0 and #agentRecords == 0, #history + #agentRecords)
+
+Properties["Record GenAI Object Descriptions"] = "Yes"
 history, agentRecords, agentMetadata, urlGetCalls, timelinePayloads = {}, {}, {}, {}, {}
 ExecuteCommand("FRIGATE_OBJECT_DESCRIPTION",
     { id = "1755012345.1-abc", description = "A delivery driver leaves a parcel by the door." })
@@ -794,12 +824,12 @@ ExecuteCommand("FRIGATE_OBJECT_DESCRIPTION", { id = "y", description = "Someone 
 check("descriptions are recorded although object detections are off",
       #agentRecords == 1, #agentRecords)
 
-Properties["Record Object Descriptions"] = "No"
+Properties["Record GenAI Object Descriptions"] = "No"
 history, agentRecords = {}, {}
 ExecuteCommand("FRIGATE_OBJECT_DESCRIPTION", { id = "z", description = "Someone walked past." })
 check("descriptions have their own switch",
       #history == 0 and #agentRecords == 0, #history + #agentRecords)
-Properties["Record Object Descriptions"] = nil
+Properties["Record GenAI Object Descriptions"] = nil
 
 ------------------------------------------------------------------------
 -- Which go2rtc stream, and whether it carries audio

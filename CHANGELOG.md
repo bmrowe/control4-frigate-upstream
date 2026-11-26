@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **A delivery was filed as Motion.** A review lists its labels in no useful order, and a delivery arrives as `amazon, car, person` — `amazon` being an attribute Frigate attaches to a car or person, not an object. The entry took its type from the first label, found no Control4 type for `amazon`, and fell back to `Motion`. It now takes the most telling label present, a person first, then package, vehicle and animal; a carrier logo alone is filed as `Package`.
+
 - **The camera list was served full-resolution frames.** `GET_SNAPSHOT_QUERY_STRING` ignored the size Navigator asked for, so every thumbnail on the camera page requested the camera's full-size frame — eight at once, which is why that page spun while a single camera opened fine. Frigate resizes on `height`; `h` is not one of its parameters and is ignored without complaint, so the notification snapshot's `h=480` was serving full-size too. Snapshot and MJPEG now pass the requested height (clamped 120–1080), suppress Frigate's debug overlays with `bbox=0&timestamp=0`, and convert Navigator's frame delay to the `fps` the MJPEG endpoint expects.
 
 - **History entries carried no picture, because they were filed under a subcategory Navigator does not render.** Entries were written as `Cameras` / `Frigate` with event types of the driver's own invention (`Person Detected`, `Audio: Speech`). Navigator heads an entry with its event *type*, accepts only a registered type, and renders the attached image only for Control4's own camera history. Entries now use `Cameras` / `IP Camera` and Control4's own vocabulary — `Person`, `Vehicle`, `Animal`, `Package`, `Face`, `License Plate`, `Motion`, and the audio types — with Frigate's labels mapped onto that set. Descriptive text, including a GenAI summary, goes in the description.
@@ -40,9 +42,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **A replayed review fills the Timeline only.** `SetPastEvent` takes a timestamp, so a replayed incident lands where it happened. `RECORD_HISTORICAL_EVENT` has no timestamp parameter, so a history entry for a two-day-old incident would be stamped at the moment of the replay — twenty-seven incidents all dated the same minute is worse than none. Live incidents still reach both.
 
-- **GenAI object descriptions are recorded in the history,** with the described object's own snapshot attached. `frigate/tracked_object_update` carries the generated text well after the detection it describes, so it is recorded as its own entry of type `Object Described` rather than amending one already written. It follows the `Record Object Detections` switch.
+- **GenAI object descriptions can be recorded in the history,** with the described object's own snapshot attached, under `Record GenAI Object Descriptions`. `frigate/tracked_object_update` carries the generated text well after the detection it describes, so each is its own entry rather than an amendment to one already written. Off by default: a review is built from several tracked objects, each described separately, so one delivery with this on became four rows — the review plus one per car and person — where Frigate shows a single item.
 
-- **Per-category history switches (camera driver).** Seven new properties decide what reaches the history: `Record Review Incidents`, `Record Object Descriptions`, `Record Object Detections`, `Record Motion Events`, `Record Zone Events`, `Record Audio Events` and `Record Camera Status`. The Timeline has its own switches and is unaffected by these.
+- **Per-category history switches (camera driver).** Seven new properties decide what reaches the history: `Record Review Incidents`, `Record GenAI Object Descriptions`, `Record Object Detections`, `Record Motion Events`, `Record Zone Events`, `Record Audio Events` and `Record Camera Status`. The Timeline has its own switches and is unaffected by these.
 
 ### Changed
 

@@ -6,7 +6,7 @@
   <model>Frigate Camera (go2rtc)</model>
   <created>2026-03-31</created>
   <modified>2026-08-14</modified>
-  <version>45</version>
+  <version>46</version>
 
   <capabilities>
     <modes>SNAPSHOT,MJPEG,H264</modes>
@@ -237,15 +237,15 @@
         <description>Write one History entry per Frigate review incident, with the GenAI summary as its text and the incident's snapshot attached.</description>
       </property>
       <property>
-        <name>Record Object Descriptions</name>
+        <name>Record GenAI Object Descriptions</name>
         <type>LIST</type>
-        <default>Yes</default>
+        <default>No</default>
         <readonly>false</readonly>
         <items>
           <item>Yes</item>
           <item>No</item>
         </items>
-        <description>Write Frigate's GenAI object descriptions to History, with the described object's snapshot attached. One per tracked object rather than per count transition, so this is separate from Record Object Detections.</description>
+        <description>Write Frigate's GenAI object descriptions to History, with the described object's snapshot attached. Off by default: a review incident is built from several tracked objects, each described separately, so one delivery becomes several rows beside the review entry whose summary already covers it.</description>
       </property>
       <property>
         <name>Record Object Detections</name>
@@ -256,7 +256,7 @@
           <item>Yes</item>
           <item>No</item>
         </items>
-        <description>Write person, car, dog, cat and generic object detections to History. Off by default: these fire on every count transition, so one incident becomes several rows and buries the review entry that already describes it. They reach the Timeline instead. Also covers GenAI object descriptions.</description>
+        <description>Write person, car, dog, cat and generic object detections to History. Off by default: these fire on every count transition, so one incident becomes several rows and buries the review entry that already describes it. They reach the Timeline instead. GenAI object descriptions have their own switch.</description>
       </property>
       <property>
         <name>Record Motion Events</name>

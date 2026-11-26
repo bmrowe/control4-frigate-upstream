@@ -40,7 +40,7 @@ local PROP_NOTIFY_FRESHNESS = "Notification Image Freshness (seconds)"
 -- history is there for; that one defaults off and the rest keep the previous
 -- behaviour.
 local PROP_HIST_REVIEWS = "Record Review Incidents"
-local PROP_HIST_DESCRIBED = "Record Object Descriptions"
+local PROP_HIST_DESCRIBED = "Record GenAI Object Descriptions"
 local PROP_HIST_OBJECTS = "Record Object Detections"
 local PROP_HIST_MOTION  = "Record Motion Events"
 local PROP_HIST_ZONES   = "Record Zone Events"
@@ -380,9 +380,13 @@ local HISTORY_CATEGORY_PROP = {
 -- Those default off and reach the Timeline instead. Audio detections and
 -- camera status are discrete and rare, so they stay on.
 -- A GenAI description is one per tracked object, not one per count
--- transition, so it does not belong behind the object-detection switch.
+-- transition, so it has its own switch rather than the object-detection one.
+-- It is still off: a review is built from several tracked objects, so one
+-- delivery with descriptions on became four rows -- the review plus one per
+-- car and person -- where Frigate shows one. The review's summary already
+-- describes the incident.
 local HISTORY_CATEGORY_DEFAULT = {
-    reviews = true, descriptions = true, objects = false, motion = false,
+    reviews = true, descriptions = false, objects = false, motion = false,
     zones = false, audio = true, status = true,
 }
 
@@ -818,10 +822,34 @@ end
 --- free text. Naming the objects gives a list that reads like the detections
 --- it describes rather than a column of identical "Review Alert" rows, and
 --- the title goes in the description.
+---
+--- A review lists its labels in no useful order -- a delivery arrives as
+--- `amazon, car, person` -- and `amazon` is an attribute Frigate attaches to a
+--- car or a person, not an object. Heading by the first label filed that
+--- delivery as Motion. The type is the most telling label present instead: a
+--- person first, since that is what the history is for. A carrier logo with
+--- nothing else beside it still means a delivery.
+local REVIEW_TYPE_RANK = {
+    "Person", "Package", "Vehicle", "Animal", "Face", "License Plate",
+}
+local CARRIER_LABELS = {
+    amazon = true, ups = true, fedex = true, usps = true, dhl = true,
+    dpd = true, gls = true, an_post = true, purolator = true, postnl = true,
+    nzpost = true, postnord = true,
+}
 local function reviewHistoryType(p)
-    local first = (p.objects or ""):match("^[^,]+")
-    if not first or first == "" then return "Motion" end
-    return objectHistoryType((first:gsub("%s+$", "")))
+    local present, carrier = {}, false
+    for word in (p.objects or ""):gmatch("[^,%s]+") do
+        local label = word:lower()
+        local t = OBJECT_TO_HISTORY_TYPE[label]
+        if t then present[t] = true end
+        if CARRIER_LABELS[label] then carrier = true end
+    end
+    for _, t in ipairs(REVIEW_TYPE_RANK) do
+        if present[t] then return t end
+    end
+    if carrier then return "Package" end
+    return "Motion"
 end
 
 local function emitReview(id, p)

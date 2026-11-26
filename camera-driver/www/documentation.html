@@ -136,7 +136,7 @@
   <table>
     <tr><th>Property</th><th>Default</th><th>Covers</th></tr>
     <tr><td><code>Record Review Incidents</code></td><td>Yes</td><td>One entry per Frigate review item, with its snapshot attached</td></tr>
-    <tr><td><code>Record Object Descriptions</code></td><td>Yes</td><td>GenAI object descriptions, with the described object's snapshot</td></tr>
+    <tr><td><code>Record GenAI Object Descriptions</code></td><td><b>No</b></td><td>GenAI object descriptions, with the described object's snapshot</td></tr>
     <tr><td><code>Record Object Detections</code></td><td><b>No</b></td><td>Person, car, dog, cat and generic object detected/left</td></tr>
     <tr><td><code>Record Motion Events</code></td><td><b>No</b></td><td>Motion Detected, Motion Stopped</td></tr>
     <tr><td><code>Record Zone Events</code></td><td><b>No</b></td><td>Zone entered, zone exited, loitering</td></tr>
@@ -214,9 +214,12 @@
 
   <h3>GenAI object descriptions</h3>
   <p>Where Frigate is configured with GenAI object descriptions, the generated text arrives well after
-  the detection it describes. It is recorded as its own history entry of type
-  <code>Object Described</code>, rather than amending an entry already written, and follows the
-  <code>Record Object Detections</code> switch.</p>
+  the detection it describes. With <code>Record GenAI Object Descriptions</code> on, each is recorded as
+  its own history entry rather than amending one already written. It is off by default: a review
+  incident is usually built from several tracked objects, each described separately, so one delivery
+  would appear as the review plus a row per car and person, while Frigate shows one item. The review's
+  own summary already describes the incident. Frigate's description message does not name the object,
+  so these entries are headed <code>Person</code>.</p>
 
   <h3>Choosing the stream</h3>
   <p><code>Use Sub Stream</code> plays Frigate's own <code>&lt;camera&gt;_sub</code>.
